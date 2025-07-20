@@ -31,10 +31,10 @@ if __name__ == "__main__":
     env = env()
     max_action = env.action_space.high[0]
 
-    n_epochs = 10
-    batch_size = 64
+    n_epochs = 5
+    batch_size = 32
     episode_num = 15000
-    training_interval_step = 256
+    training_interval_step = 512
     timeLimit = env.spec.max_episode_steps
 
     chkpt_dir = f"./results/{env_name}/models/PPO"
@@ -60,6 +60,13 @@ if __name__ == "__main__":
         n_epochs=n_epochs,
         logger=logger,
         chkpt_dir=chkpt_dir,
+        ent_coef=0.00229519,
+        gae_lambda=0.99,
+        gamma=0.999,
+        lr=9.8e-5,
+        max_grad_norm=0.7,
+        clip_coef=0.2,
+        vf_coef=0.835671,
     )
 
     best_score = -np.inf
