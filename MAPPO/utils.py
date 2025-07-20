@@ -48,9 +48,10 @@ def anneal_learning_rate(
     initial_lr: float,
     current_step: int,
     total_steps: int,
+    final_lr: float = 1e-4,
 ) -> None:
     """Anneal the learning rate linearly."""
-    lr = initial_lr * (1 - (current_step / float(total_steps)))
+    lr = initial_lr + (final_lr - initial_lr) * current_step / float(total_steps)
     for param_group in optimizer.param_groups:
         param_group["lr"] = lr
 
