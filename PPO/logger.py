@@ -84,8 +84,7 @@ class EvaluationLogger:
             done = False
 
             while not done:
-                action, _, _ = self.agent.policy(state, deterministic=True)
-                action = action.squeeze().detach().cpu().numpy()
+                action = self.agent.predict(state, deterministic=True)
                 next_state, reward, terminated, truncated, info = self.eval_env.step(
                     action
                 )

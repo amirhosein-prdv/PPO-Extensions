@@ -81,6 +81,13 @@ class Agent:
             self.policy.optimizer, self.policy.initial_lr, current_step, total_steps
         )
 
+    def prdict(self, observation: T.Tensor, deterministic: bool = False) -> T.Tensor:
+
+        action, _ = self.policy.get_action(observation, deterministic)
+        action = action.detach().cpu().numpy().squeeze()
+
+        return action
+
     def learn(self) -> None:
         # Generate Data
         (
