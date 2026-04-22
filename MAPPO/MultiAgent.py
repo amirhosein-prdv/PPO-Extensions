@@ -1,11 +1,13 @@
-import torch as T
 import numpy as np
-from .utils import Logger, anneal_learning_rate
-from typing import List, Optional, Tuple
+import torch as T
+from torch.nn import functional as F
+from typing import List, Optional, Tuple, Union
 
 from pettingzoo import ParallelEnv
 
-from .Agent import Agent
+from .Networks import ActorCriticNetwork
+from .utils import anneal_learning_rate
+from .logger import Logger
 from .RolloutBuffer import MultiAgentRolloutBuffer
 
 
@@ -18,76 +20,98 @@ class MultiAgent:
         lr: float = 3e-4,
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
-        clip_coef: float = 0.2,
+        clip_range: float = 0.2,
+        clip_range_vf: Union[None, float] = None,
         vf_coef: float = 0.5,
         ent_coef: float = 0.0,
         max_grad_norm: float = 0.5,
         target_kl: Optional[float] = None,
+        normalize_advantage: bool = True,
         logger: Optional["Logger"] = None,
         chkpt_dir: str = "./tmp/PPO-MultiAgent",
-        policy_kwargs: dict[str, List[int]] = {
+        policy_kwargs: dict[str, dict[str, List[int]]] | dict[str, List[int]] = {
             "feature": [32],
             "pi": [64, 64],
             "vf": [64, 64],
         },
+        # policy_kwargs: dict[str, List[int]] = {
+        #     "feature": [32],
+        #     "pi": [64, 64],
+        #     "vf": [64, 64],
+        # },
     ) -> None:
 
-        self.clip_coef = clip_coef
+        self.clip_range = clip_range
+        self.clip_range_vf = clip_range_vf
         self.ent_coef = ent_coef
         self.vf_coef = vf_coef
         self.max_grad_norm = max_grad_norm
         self.target_kl = target_kl
+        self.normalize_advantage = normalize_advantage
 
         self.n_epochs = n_epochs
         self.logger = logger
 
-        self.norm_adv = True
-        self.clip_vloss = True
-
         self.possible_agents = env.possible_agents
         self.num_agents = env.num_agents
 
+        if not isinstance(next(iter(policy_kwargs.values())), dict):
+            policy_kwargs = {agent: policy_kwargs for agent in self.possible_agents}
+
         self.agents = {
-            agent: Agent(
+            agent: ActorCriticNetwork(
                 state_dim=env.observation_space(agent).shape[0],
                 action_dim=env.action_space(agent).shape[0],
-                max_action=env.action_space(agent).high[0],
-                lr=lr,
-                gamma=gamma,
-                gae_lambda=gae_lambda,
-                policy_kwargs=policy_kwargs,
+                feature_fc_dims=policy_kwargs[agent]["feature"],
+                actor_fc_dims=policy_kwargs[agent]["pi"],
+                critic_fc_dims=policy_kwargs[agent]["vf"],
+                policy_lr=lr,
                 chkpt_dir=chkpt_dir,
-                model_name=f"actor-critic_{agent}",
+                model_name=f"ppo-actor-critic_{agent}",
             )
             for agent in self.possible_agents
         }
 
-        self.memory = MultiAgentRolloutBuffer(batch_size, self.possible_agents)
+        self.memory = MultiAgentRolloutBuffer(
+            batch_size, gamma, gae_lambda, self.possible_agents
+        )
         self.device = self.agents[list(self.agents.keys())[0]].device
 
     def anneal_lr(self, current_step: int, total_steps: int) -> None:
         """Anneal the learning rate of the policy network."""
         for agent in self.agents.values():
             anneal_learning_rate(
-                agent.policy.optimizer,
-                agent.policy.initial_lr,
+                agent.optimizer,
+                agent.initial_lr,
                 current_step,
                 total_steps,
             )
 
-    def get_action(self, state: np.ndarray) -> dict:
-        action = {}
-        logprob = {}
-        value = {}
+    def get_actions(
+        self, state: dict, deterministic: bool = False
+    ) -> Tuple[dict, dict, dict]:
+        actions = {}
+        logprobs = {}
+        values = {}
         for agent_name, agent in self.agents.items():
-            action[agent_name], logprob[agent_name], value[agent_name] = (
-                agent.get_action(state[agent_name])
-            )
-        return action, logprob, value
+            act, lp = agent.get_action(state[agent_name], deterministic)
+            val = agent.get_value(state[agent_name])
+            logprobs[agent_name] = lp.detach().cpu().numpy()
+            actions[agent_name] = act.detach().squeeze().cpu().numpy()
+            values[agent_name] = val.detach().squeeze(0).cpu().numpy()
+
+        return actions, values, logprobs
+
+    def get_values(self, state: dict) -> dict:
+        values = {}
+        for agent_name, agent in self.agents.items():
+            val = agent.get_value(state[agent_name])
+            values[agent_name] = val.detach().squeeze(0).cpu().numpy()
+        return values
 
     def eval(self) -> None:
         for agent in self.agents.values():
-            agent.policy.eval()
+            agent.eval()
 
     def learn(self) -> None:
         for agent in self.possible_agents:
@@ -99,86 +123,74 @@ class MultiAgent:
         (
             state_arr,
             action_arr,
-            old_prob_arr,
+            old_logprob_arr,
             values_arr,
-            next_states_arr,
-            reward_arr,
-            dones_arr,
+            advantages_arr,
+            returns_arr,
         ) = self.memory.get_data(agent_name)
 
         agent = self.agents[agent_name]
 
-        # Calculate Advantages
-        advantages, returns = agent.get_GAE_and_returns(
-            reward_arr, values_arr, dones_arr, next_states_arr
-        )
-
-        returns = T.tensor(returns, dtype=T.float32).to(self.device)
-        advantages = T.tensor(advantages, dtype=T.float32).to(self.device)
-        values = T.tensor(values_arr, dtype=T.float32).to(self.device)
+        returns = T.tensor(returns_arr, dtype=T.float32).squeeze().to(self.device)
+        advantages = T.tensor(advantages_arr, dtype=T.float32).squeeze().to(self.device)
+        values = T.tensor(values_arr, dtype=T.float32).squeeze().to(self.device)
 
         clipfracs = []
         critic_buffer = []
         actor_buffer = []
         entropy_buffer = []
         approx_kl_buffer = []
-        explained_var_buffer = []
-        agent.policy.train()
+        agent.train()
         for _ in range(self.n_epochs):
-            # Generate batch data
+            # Generate minibatch data
             batches = self.memory.generate_batches(agent_name)
 
             # Training
-            for batch in batches:
-                states = T.tensor(state_arr[batch], dtype=T.float).to(self.device)
-                old_probs = T.tensor(old_prob_arr[batch]).to(self.device)
-                actions = T.tensor(action_arr[batch]).to(self.device)
-
-                dist, new_value = agent.policy(states)
-                new_value = T.squeeze(new_value)
-
-                dist_entropy = dist.entropy().sum(1, keepdim=True)
-                new_probs = dist.log_prob(actions).sum(1)
-                prob_ratio = (new_probs - old_probs).exp()
-                prob_logratio = new_probs - old_probs
-
-                with T.no_grad():
-                    # calculate approx_kl http://joschu.net/blog/kl-approx.html
-                    approx_kl = ((prob_ratio - 1) - prob_logratio).mean()
-                    clipfracs += [
-                        ((prob_ratio - 1.0).abs() > self.clip_coef)
-                        .float()
-                        .mean()
-                        .item()
-                    ]
+            for minibatch in batches:
+                old_logprob = (
+                    T.tensor(old_logprob_arr[minibatch]).squeeze().to(self.device)
+                )
+                new_value, new_logprob, entropy = agent.evaluate_action(
+                    state_arr[minibatch], action_arr[minibatch]
+                )
+                new_value = new_value.flatten()
+                prob_ratio = T.exp(new_logprob - old_logprob)
+                prob_logratio = new_logprob - old_logprob
 
                 # nomalize advantage
-                normalized_advantages = (
-                    advantages[batch] - advantages[batch].mean()
-                ) / (advantages[batch].std() + 1e-8)
+                if self.normalize_advantage:
+                    normalized_advantages = (
+                        advantages[minibatch] - advantages[minibatch].mean()
+                    ) / (advantages[minibatch].std() + 1e-8)
+                else:
+                    normalized_advantages = advantages[minibatch]
 
                 # calculate actor loss
                 weighted_probs = normalized_advantages * prob_ratio
                 weighted_clipped_probs = (
-                    T.clamp(prob_ratio, 1 - self.clip_coef, 1 + self.clip_coef)
+                    T.clamp(prob_ratio, 1 - self.clip_range, 1 + self.clip_range)
                     * normalized_advantages
                 )
                 actor_loss = -T.min(weighted_probs, weighted_clipped_probs).mean()
 
                 # Calculate Critic loss
-                # clip value loss
-                clipped_value = values[batch] + T.clamp(
-                    new_value - values[batch],
-                    -self.clip_coef,
-                    self.clip_coef,
-                )
-                critic_loss_clipped = (returns[batch] - clipped_value) ** 2
-                critic_loss_unclipped = (returns[batch] - new_value) ** 2
-                critic_loss_max = T.max(critic_loss_clipped, critic_loss_unclipped)
-                critic_loss = 0.5 * critic_loss_max.mean()
+                if self.clip_range_vf is None:
+                    critic_loss = F.mse_loss(returns[minibatch], new_value)
+                else:
+                    # clip value loss
+                    clipped_value = values[minibatch] + T.clamp(
+                        new_value - values[minibatch],
+                        -self.clip_range_vf,
+                        self.clip_range_vf,
+                    )
+
+                    critic_loss_clipped = (returns[minibatch] - clipped_value) ** 2
+                    critic_loss_unclipped = (returns[minibatch] - new_value) ** 2
+                    critic_loss_max = T.max(critic_loss_clipped, critic_loss_unclipped)
+                    critic_loss = 0.5 * critic_loss_max.mean()
 
                 # Calculate entropy loss
-                entropy_loss = dist_entropy.mean()
+                entropy_loss = entropy.mean()
 
                 total_loss = (
                     actor_loss
@@ -186,60 +198,61 @@ class MultiAgent:
                     - self.ent_coef * entropy_loss
                 )
 
-                agent.policy.optimizer.zero_grad()
-                total_loss.backward()
-                T.nn.utils.clip_grad_norm_(
-                    agent.policy.parameters(), self.max_grad_norm
-                )
-                agent.policy.optimizer.step()
+                with T.no_grad():
+                    # calculate approx_kl http://joschu.net/blog/kl-approx.html
+                    approx_kl = T.mean((prob_ratio - 1) - prob_logratio).cpu().numpy()
+                    clipfracs += [
+                        ((prob_ratio - 1.0).abs() > self.clip_range)
+                        .float()
+                        .mean()
+                        .item()
+                    ]
 
-                # Calculate explained variance
-                y_pred, y_true = values.cpu().numpy(), returns.cpu().numpy()
-                var_y = np.var(y_true)
-                explained_var = (
-                    np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
-                )
+                if self.target_kl is not None:
+                    if approx_kl > self.target_kl:
+                        break
+
+                agent.optimizer.zero_grad()
+                total_loss.backward()
+                T.nn.utils.clip_grad_norm_(agent.parameters(), self.max_grad_norm)
+                agent.optimizer.step()
 
                 # Store training variable to log
                 critic_buffer.append(critic_loss.item())
                 actor_buffer.append(actor_loss.item())
                 entropy_buffer.append(entropy_loss.item())
                 approx_kl_buffer.append(approx_kl.item())
-                explained_var_buffer.append(explained_var)
 
-            if self.target_kl is not None:
-                if approx_kl > self.target_kl:
-                    break
+        # Calculate explained variance
+        y_pred, y_true = (
+            values.cpu().numpy(),
+            returns.cpu().numpy(),
+        )
+        var_y = np.var(y_true)
+        explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
         if self.logger is not None:
             # record for plotting purposes
+            name = f"train/agent_{agent_name}"
+            self.logger.add_scalar(f"{name}/loss", total_loss.item())
+            self.logger.add_scalar(f"{name}/value_loss", np.mean(critic_buffer))
             self.logger.add_scalar(
-                "train/learning_rate", agent.policy.optimizer.param_groups[0]["lr"]
+                f"{name}/policy_gradient_loss", np.mean(actor_buffer)
             )
+            self.logger.add_scalar(f"{name}/entropy", np.mean(entropy_buffer))
+            self.logger.add_scalar(f"{name}/approx_kl", np.mean(approx_kl_buffer))
+            self.logger.add_scalar(f"{name}/clip_fraction", np.mean(clipfracs))
+            self.logger.add_scalar(f"{name}/explained_variance", np.mean(explained_var))
             self.logger.add_scalar(
-                f"train/agent_{agent_name}/value_loss", np.mean(critic_buffer)
-            )
-            self.logger.add_scalar(
-                f"train/agent_{agent_name}/policy_loss", np.mean(actor_buffer)
-            )
-            self.logger.add_scalar(
-                f"train/agent_{agent_name}/entropy", np.mean(entropy_buffer)
-            )
-            self.logger.add_scalar(
-                f"train/agent_{agent_name}/approx_kl", np.mean(approx_kl_buffer)
-            )
-            self.logger.add_scalar(
-                f"train/agent_{agent_name}/clipfrac", np.mean(clipfracs)
-            )
-            self.logger.add_scalar(
-                f"train/agent_{agent_name}/explained_variance",
-                np.mean(explained_var_buffer),
+                f"{name}/learning_rate", agent.optimizer.param_groups[0]["lr"]
             )
 
     def save_models(self) -> None:
+        print("... saving models ...")
         for agent in self.agents.values():
-            agent.save_models()
+            agent.save_checkpoint()
 
     def load_models(self) -> None:
+        print("... loading models ...")
         for agent in self.agents.values():
-            agent.load_models()
+            agent.load_checkpoint()

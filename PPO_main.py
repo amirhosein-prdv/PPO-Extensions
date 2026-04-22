@@ -1,8 +1,10 @@
 from typing import Optional
 import gymnasium as gym
 import numpy as np
+import torch
 from PPO.Agent import Agent
-from PPO.utils import Logger, get_unique_log_dir, plot_learning_curve
+from PPO.utils import get_unique_log_dir, plot_learning_curve
+from PPO.logger import Logger, StepLogger, EvaluationLogger
 
 
 def make_env(gym_id, seed: Optional[int] = None):
@@ -29,6 +31,8 @@ if __name__ == "__main__":
     env_name = "Hopper"
     env = make_env("Hopper-v5")
     env = env()
+    # eval_env = make_env("Hopper-v5")
+    # eval_env = eval_env()
     max_action = env.action_space.high[0]
 
     n_epochs = 5
@@ -54,7 +58,6 @@ if __name__ == "__main__":
     agent = Agent(
         state_dim=env.observation_space.shape[0],
         action_dim=env.action_space.shape[0],
-        max_action=max_action,
         policy_kwargs=policy_kwargs,
         batch_size=batch_size,
         n_epochs=n_epochs,
@@ -69,6 +72,9 @@ if __name__ == "__main__":
         vf_coef=0.835671,
     )
 
+    # step_logger = StepLogger(logger, step_interval=1, suffix_title="eps")
+    # eval_logger = EvaluationLogger(eval_env, agent, logger, eval_episodes=10)
+
     best_score = -np.inf
     score_history = []
 
@@ -79,15 +85,16 @@ if __name__ == "__main__":
     n_steps = 0
     for eps in range(episode_num):
         state, info = env.reset()
-        done = False
+        last_done = False
         score = 0
         t_step = 0
-        while not done:
+        while not last_done:
             agent.policy.eval()
-            action, logprob, value = agent.get_action(state)
+            with torch.no_grad():
+                action, value, logprob = agent.policy(state)
             action = action.detach().cpu().numpy().squeeze()
-            logprob = logprob.item()
-            value = value.item()
+            logprob = logprob.detach().cpu().numpy()
+            value = value.squeeze(0).detach().cpu().numpy()
 
             next_state, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
@@ -95,33 +102,39 @@ if __name__ == "__main__":
 
             n_steps += 1
             t_step += 1
+            # step_logger.add_info(info)
             logger.update_global_step(n_steps)
             logger.add_scalar("rollout/step_reward", reward, n_steps)
 
-            if truncated:
-                reward += 0.99 * agent.get_value(next_state).item()
+            # if truncated:
+            #     reward += 0.99 * agent.policy.get_value(next_state).detach().item()
 
             agent.memory.store(
                 state,
                 action,
                 logprob,
                 value,
-                next_state,
                 reward,
-                done,
+                last_done,
             )
             if n_steps % training_interval_step == 0:  # or done: (Think !)
                 agent.anneal_lr(current_step=1, total_steps=1000)
+                last_value = agent.policy.get_value(next_state).detach().item()
+                agent.memory.compute_GAE_and_returns(last_value=last_value, done=done)
                 agent.learn()
+                # eval_logger.evaluate_and_log()
                 learn_iters += 1
             state = next_state
+            last_done = done
+
+        # # step_logger.record_log()
 
         score_history.append(score)
         avg_score = np.mean(score_history[-10:])
 
-        logger.add_scalar("rollout/avg score", avg_score, n_steps)
-        logger.add_scalar("rollout/episode_reward", score, n_steps)
-        logger.add_scalar("rollout/episode_len", t_step, n_steps)
+        logger.add_scalar("rollout/ep_rew", score, n_steps)
+        logger.add_scalar("rollout/ep_rew_mean", avg_score, n_steps)
+        logger.add_scalar("rollout/ep_len_mean", t_step, n_steps)
 
         if avg_score > best_score:
             best_score = avg_score
@@ -137,5 +150,6 @@ if __name__ == "__main__":
             "episode_step",
             t_step,
         )
-    x = [i + 1 for i in range(len(score_history))]
-    plot_learning_curve(x, score_history, figure_file)
+
+    # x = [i + 1 for i in range(len(score_history))]
+    # plot_learning_curve(x, score_history, figure_file)
