@@ -1,4 +1,4 @@
-from pyparsing import Optional
+from typing import Optional
 import torch as T
 from torch.utils.tensorboard import SummaryWriter
 from .utils import get_unique_log_dir
