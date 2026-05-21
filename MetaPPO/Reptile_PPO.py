@@ -1,10 +1,12 @@
+from copy import deepcopy
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import gymnasium as gym
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict, Optional, Union
 
 from .PPO import PPOAgent
 from .Networks import ActorCriticNetwork
@@ -24,10 +26,17 @@ class ReptilePPO:
         state_dim: int,
         action_dim: int,
         inner_lr: float = 3e-4,
+        inner_vf_coef: float = 0.5,
+        inner_ent_coef: float = 0.001,
         meta_lr: float = 1e-3,
-        meta_clip_epsilon: float = 0.2,
         meta_vf_coef: float = 0.5,
         meta_ent_coef: float = 0.01,
+        gamma: float = 0.99,
+        gae_lambda: float = 0.95,
+        clip_epsilon: float = 0.2,
+        clip_range_vf: Union[None, float] = None,
+        max_grad_norm: float = 1.0,
+        normalize_advantage: bool = False,
         inner_steps: int = 5,
         inner_epochs: int = 4,
         inner_batch_size: int = 64,
@@ -59,10 +68,18 @@ class ReptilePPO:
         self.action_dim = action_dim
 
         self.inner_lr = inner_lr
+        self.inner_vf_coef = inner_vf_coef
+        self.inner_ent_coef = inner_ent_coef
         self.meta_lr = meta_lr
-        self.meta_clip_epsilon = meta_clip_epsilon
         self.meta_vf_coef = meta_vf_coef
         self.meta_ent_coef = meta_ent_coef
+
+        self.gamma = gamma
+        self.gae_lambda = gae_lambda
+        self.clip_epsilon = clip_epsilon
+        self.clip_range_vf = clip_range_vf
+        self.max_grad_norm = max_grad_norm
+        self.normalize_advantage = normalize_advantage
 
         self.max_steps = max_steps
         self.inner_steps = inner_steps
@@ -76,16 +93,95 @@ class ReptilePPO:
         self.base_policy = ActorCriticNetwork(state_dim, action_dim, policy_kwargs)
         self.meta_optimizer = optim.Adam(self.base_policy.parameters(), lr=meta_lr)
 
+        self.device = self.base_policy.device
+
         # Store training metrics
         self.meta_losses = []
 
-    def _clone_policy(self) -> ActorCriticNetwork:
-        """
-        Create a deep copy of the base policy for inner updates.
-        """
-        clone = ActorCriticNetwork(self.state_dim, self.action_dim, self.policy_kwargs)
-        clone.load_state_dict(self.base_policy.state_dict())
-        return clone
+    def meta_train(
+        self,
+        num_meta_iterations: int = 100,
+        eval_interval: int = 10,
+        eval_env_fn: Optional[callable] = None,
+    ):
+        """Main meta-training loop."""
+        print("Starting meta-training...")
+
+        for iteration in range(num_meta_iterations):
+            # Sample a batch of tasks
+            task_envs = [self.env_fn() for _ in range(self.outer_batch_size)]
+            all_inner_stats = []
+
+            # Inner loop: adapt to each task and collect query trajectories
+            query_trajectories_per_task = []
+            adapted_policies = []
+
+            for task_env in task_envs:
+                # Clone base policy for this task
+                task_policy = self._clone_policy()
+
+                # Perform inner updates and collect query trajectories
+                adapted_policy, inner_stats, query_trajs = self._inner_update(
+                    task_env, task_policy
+                )
+                adapted_policies.append(adapted_policy)
+                query_trajectories_per_task.append(query_trajs)
+                all_inner_stats.append(inner_stats)
+
+            avg_inner_stats = {
+                key: np.mean([s[key] for s in all_inner_stats])
+                for key in all_inner_stats[0].keys()
+            }
+
+            # ----- Reptile outer update  -----
+            # Compute average parameter difference across tasks
+            avg_param_deltas = [
+                torch.zeros_like(p) for p in self.base_policy.parameters()
+            ]
+            for adapted_policy in adapted_policies:
+                for i, (base_param, adapted_param) in enumerate(
+                    zip(self.base_policy.parameters(), adapted_policy.parameters())
+                ):
+                    avg_param_deltas[i] += adapted_param.data - base_param.data
+
+            # Average over tasks
+            for i in range(len(avg_param_deltas)):
+                avg_param_deltas[i] /= len(adapted_policies)
+
+            # Update base policy parameters (in-place, no gradients needed)
+            with torch.no_grad():
+                for base_param, delta in zip(
+                    self.base_policy.parameters(), avg_param_deltas
+                ):
+                    base_param += self.meta_lr * delta
+
+            # Compute average meta-loss for logging
+            all_meta_stats = []
+            for query_trajs in query_trajectories_per_task:
+                if query_trajs:
+                    meta_stats = self.compute_meta_loss(self.base_policy, query_trajs)
+                    all_meta_stats.append(meta_stats)
+
+            avg_meta_stats = {
+                key: np.mean([s[key] for s in all_meta_stats])
+                for key in all_meta_stats[0].keys()
+            }
+
+            # Logging
+            if iteration % eval_interval == 0:
+                print(
+                    f"\nIteration {iteration}: ",
+                    f"\nMeta Loss: Policy Loss = {avg_meta_stats['policy_loss']:.5f}, Value Loss = {avg_meta_stats['value_loss']:.5f}, Entropy = {avg_meta_stats['entropy']:.5f}",
+                    f"\nInner Loss: Policy Loss = {avg_inner_stats['policy_loss']:.5f}, Value Loss = {avg_inner_stats['value_loss']:.3f}, Entropy = {avg_inner_stats['entropy']:.3f}.",
+                )
+
+                # Evaluation
+                if eval_env_fn:
+                    self.evaluate(eval_env_fn, num_episodes=3)
+
+            # Clean up
+            for env in task_envs:
+                env.close()
 
     def _inner_update(
         self,
@@ -108,12 +204,20 @@ class ReptilePPO:
             self.state_dim,
             self.action_dim,
             lr=self.inner_lr,
-            batch_size=self.inner_batch_size,
+            vf_coef=self.inner_vf_coef,
+            ent_coef=self.inner_ent_coef,
             epochs=self.inner_epochs,
+            batch_size=self.inner_batch_size,
+            gamma=self.gamma,
+            gae_lambda=self.gae_lambda,
+            clip_epsilon=self.clip_epsilon,
+            clip_range_vf=self.clip_range_vf,
+            max_grad_norm=self.max_grad_norm,
+            normalize_advantage=self.normalize_advantage,
             policy_kwargs=self.policy_kwargs,
         )
-        agent.policy = base_policy
-        agent.optimizer = optim.Adam(base_policy.parameters(), lr=self.inner_lr)
+        agent.policy = deepcopy(base_policy)
+        agent.optimizer = optim.Adam(agent.policy.parameters(), lr=self.inner_lr)
 
         # Collect support trajectories for inner update
         support_trajectories = []
@@ -122,9 +226,14 @@ class ReptilePPO:
             support_trajectories.append(traj)
 
         # Perform inner loop updates
-        stats = {}
+        all_stats = []
         for step in range(self.inner_steps):
             stats = agent.update(support_trajectories)
+            all_stats.append(stats)
+
+        avg_stats = {
+            key: np.mean([s[key] for s in all_stats]) for key in all_stats[0].keys()
+        }
 
         # If query mode, collect fresh trajectories for meta-loss
         query_trajectories = []
@@ -132,24 +241,24 @@ class ReptilePPO:
             traj = agent.collect_trajectory(task_env, self.max_steps)
             query_trajectories.append(traj)
 
-        return agent.policy, stats, query_trajectories
+        return agent.policy, avg_stats, query_trajectories
 
     def compute_meta_loss(
         self, policy: ActorCriticNetwork, trajectories: List[Dict]
     ) -> torch.Tensor:
         """Compute meta-loss on query trajectories using the adapted policy."""
-        device = self.base_policy.device
-        policy.train()
+        policy.eval()
 
         # Concatenate all query trajectories
         states = torch.cat([t["states"] for t in trajectories])
         actions = torch.cat([t["actions"] for t in trajectories])
-        advantages = torch.cat([t["advantages"] for t in trajectories]).to(device)
-        returns = torch.cat([t["returns"] for t in trajectories]).to(device)
-        old_logprobs = torch.cat([t["logprobs"] for t in trajectories]).to(device)
+        advantages = torch.cat([t["advantages"] for t in trajectories]).to(self.device)
+        returns = torch.cat([t["returns"] for t in trajectories]).to(self.device)
+        old_logprobs = torch.cat([t["logprobs"] for t in trajectories]).to(self.device)
 
         # Normalize advantages
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        if self.normalize_advantage:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         # Compute policy loss on query set
         values, new_logprobs, entropy = policy.evaluate_action(states, actions)
@@ -158,9 +267,7 @@ class ReptilePPO:
         ratio = torch.exp(new_logprobs - old_logprobs)
         surr1 = ratio * advantages
         surr2 = (
-            torch.clamp(
-                ratio, 1.0 - self.meta_clip_epsilon, 1.0 + self.meta_clip_epsilon
-            )
+            torch.clamp(ratio, 1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon)
             * advantages
         )
         policy_loss = -torch.min(surr1, surr2).mean()
@@ -179,139 +286,12 @@ class ReptilePPO:
             - self.meta_ent_coef * entropy_loss
         )
 
-        return total_loss
-
-    def meta_train(
-        self,
-        num_meta_iterations: int = 100,
-        eval_interval: int = 10,
-        eval_env_fn: Optional[callable] = None,
-    ):
-        """Main meta-training loop."""
-        print("Starting meta-training...")
-
-        for iteration in range(num_meta_iterations):
-            # Sample a batch of tasks
-            task_envs = [self.env_fn() for _ in range(self.outer_batch_size)]
-            all_stats = []
-
-            # Inner loop: adapt to each task and collect query trajectories
-            query_trajectories_per_task = []
-            adapted_policies = []
-
-            for task_env in task_envs:
-                # Clone base policy for this task
-                task_policy = self._clone_policy()
-
-                # Perform inner updates and collect query trajectories
-                adapted_policy, stats, query_trajs = self._inner_update(
-                    task_env, task_policy
-                )
-                adapted_policies.append(adapted_policy)
-                query_trajectories_per_task.append(query_trajs)
-                all_stats.append(stats)
-
-            # ----- Reptile outer update (move base policy towards adapted policies) -----
-            # Compute average parameter difference across tasks
-            avg_param_deltas = [
-                torch.zeros_like(p) for p in self.base_policy.parameters()
-            ]
-            for adapted_policy in adapted_policies:
-                for i, (base_param, adapted_param) in enumerate(
-                    zip(self.base_policy.parameters(), adapted_policy.parameters())
-                ):
-                    avg_param_deltas[i] += adapted_param.data - base_param.data
-
-            # Average over tasks
-            for i in range(len(avg_param_deltas)):
-                avg_param_deltas[i] /= len(adapted_policies)
-
-            # Update base policy parameters (in-place, no gradients needed)
-            with torch.no_grad():
-                for base_param, delta in zip(
-                    self.base_policy.parameters(), avg_param_deltas
-                ):
-                    base_param += self.meta_lr * delta
-
-            # (Optional) Compute average meta-loss for logging
-            meta_loss_val = 0.0
-            count = 0
-            for adapted_policy, query_trajs in zip(
-                adapted_policies, query_trajectories_per_task
-            ):
-                if query_trajs:
-                    adapted_query_loss = self.compute_meta_loss(
-                        adapted_policy, query_trajs
-                    )
-                    meta_loss_val += adapted_query_loss.item()
-                    count += 1
-            if count > 0:
-                meta_loss_val /= count
-            self.meta_losses.append(meta_loss_val)
-
-            # ## Outer loop: compute meta-gradient
-            # meta_loss_val = 0.0
-            # meta_grads = [torch.zeros_like(p) for p in self.base_policy.parameters()]
-            # for adapted_policy, query_trajs in zip(
-            #     adapted_policies, query_trajectories_per_task
-            # ):
-            #     if query_trajs:
-            #         adapted_query_loss = self.compute_meta_loss(
-            #             adapted_policy, query_trajs
-            #         )
-            #         meta_loss_val += adapted_query_loss.item()
-
-            #         adapted_grads = torch.autograd.grad(
-            #             adapted_query_loss, adapted_policy.parameters()
-            #         )
-            #         for i, g in enumerate(adapted_grads):
-            #             meta_grads[i] += g
-
-            # # Update base policy using these gradients
-            # with torch.no_grad():
-            #     for base_param, grad in zip(self.base_policy.parameters(), meta_grads):
-            #         base_param -= self.meta_lr * grad  # or use optimizer update
-
-            # meta_loss_val = meta_loss_val / self.outer_batch_size
-
-            ## Outer loop: compute meta-gradient
-            # meta_loss = 0.0
-            # for adapted_policy, query_trajs in zip(
-            #     adapted_policies, query_trajectories_per_task
-            # ):
-            #     if query_trajs:
-            #         adapted_query_loss = self.compute_meta_loss(
-            #             adapted_policy, query_trajs
-            #         )
-            #         meta_loss += adapted_query_loss
-
-            # meta_loss = meta_loss / self.outer_batch_size
-
-            # Update base policy
-            # self.meta_optimizer.zero_grad()
-            # meta_loss.backward()
-            # torch.nn.utils.clip_grad_norm_(self.base_policy.parameters(), 1.0)
-            # self.meta_optimizer.step()
-
-            # meta_loss_val = meta_loss.item()
-            # self.meta_losses.append(meta_loss_val)
-
-            # Logging
-            if iteration % eval_interval == 0:
-                avg_policy_loss = np.mean([s["policy_loss"] for s in all_stats])
-                avg_value_loss = np.mean([s["value_loss"] for s in all_stats])
-                print(
-                    f"\nIteration {iteration}: Meta Loss = {meta_loss_val:.4f}, "
-                    f"Avg Inner Loss: Policy = {avg_policy_loss:.4f}, Value = {avg_value_loss:.4f}."
-                )
-
-                # Evaluation
-                if eval_env_fn:
-                    self.evaluate(eval_env_fn, num_episodes=3)
-
-            # Clean up
-            for env in task_envs:
-                env.close()
+        return {
+            "loss": total_loss.item(),
+            "policy_loss": policy_loss.item(),
+            "value_loss": value_loss.item(),
+            "entropy": entropy_loss.item(),
+        }
 
     def adapt_to_new_task(
         self, task_env: gym.Env, adaptation_steps: int = 5, num_trajectories: int = 5
@@ -325,7 +305,7 @@ class ReptilePPO:
             batch_size=self.inner_batch_size,
             epochs=self.inner_epochs,
         )
-        agent.policy = self._clone_policy()
+        agent.policy = deepcopy(self._clone_policy())
         agent.optimizer = optim.Adam(agent.policy.parameters(), lr=self.inner_lr)
 
         # Collect trajectories
@@ -335,10 +315,16 @@ class ReptilePPO:
             trajectories.append(traj)
 
         # Adapt
+        all_stats = []
         for step in range(adaptation_steps):
             stats = agent.update(trajectories)
+            all_stats.append(stats)
 
-        return agent
+        avg_stats = {
+            key: np.mean([s[key] for s in all_stats]) for key in all_stats[0].keys()
+        }
+
+        return agent, avg_stats
 
     def evaluate(self, env_fn, num_episodes: int = 5, adaptation_steps: int = 3):
         """Evaluate the meta-learned policy on new tasks."""
@@ -346,7 +332,9 @@ class ReptilePPO:
 
         for episode in range(num_episodes):
             env = env_fn()
-            agent = self.adapt_to_new_task(env, adaptation_steps=adaptation_steps)
+            agent, stats = self.adapt_to_new_task(
+                env, adaptation_steps=adaptation_steps
+            )
 
             # Test the adapted policy
             state, _ = env.reset()
@@ -371,3 +359,11 @@ class ReptilePPO:
             f"Evaluation: Avg Reward = {avg_reward:.2f} ± {np.std(total_rewards):.2f}"
         )
         return avg_reward
+
+    def _clone_policy(self) -> ActorCriticNetwork:
+        """
+        Create a deep copy of the base policy for inner updates.
+        """
+        clone = ActorCriticNetwork(self.state_dim, self.action_dim, self.policy_kwargs)
+        clone.load_state_dict(self.base_policy.state_dict())
+        return clone
