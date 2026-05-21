@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 import gymnasium as gym
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Union
 
 from .Networks import ActorCriticNetwork
 
@@ -17,14 +17,16 @@ class PPOAgent:
         state_dim: int,
         action_dim: int,
         lr: float = 3e-4,
-        gamma: float = 0.99,
-        gae_lambda: float = 0.95,
-        clip_epsilon: float = 0.2,
         vf_coef: float = 0.5,
         ent_coef: float = 0.01,
         epochs: int = 4,
         batch_size: int = 64,
+        gamma: float = 0.99,
+        gae_lambda: float = 0.95,
+        clip_epsilon: float = 0.2,
+        clip_range_vf: Union[None, float] = None,
         max_grad_norm: float = 0.5,
+        normalize_advantage: bool = False,
         policy_kwargs: dict[str, List[int]] = {
             "feature": [],
             "pi": [64, 64],
@@ -34,12 +36,16 @@ class PPOAgent:
 
         self.policy = ActorCriticNetwork(state_dim, action_dim, policy_kwargs)
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
+
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.clip_epsilon = clip_epsilon
+        self.clip_range_vf = clip_range_vf
+        self.max_grad_norm = max_grad_norm
+        self.normalize_advantage = normalize_advantage
+
         self.epochs = epochs
         self.batch_size = batch_size
-        self.max_grad_norm = max_grad_norm
         self.vf_coef = vf_coef
         self.ent_coef = ent_coef
 
@@ -100,13 +106,19 @@ class PPOAgent:
                 policy_loss = -torch.min(surr1, surr2).mean()
 
                 # Value loss (clipped) - NOW batch_old_values is defined
-                values = values.squeeze()
-                value_pred_clipped = batch_old_values + torch.clamp(
-                    values - batch_old_values, -self.clip_epsilon, self.clip_epsilon
-                )
-                value_loss_unclipped = F.mse_loss(values, batch_returns)
-                value_loss_clipped = F.mse_loss(value_pred_clipped, batch_returns)
-                value_loss = torch.max(value_loss_unclipped, value_loss_clipped)
+                if self.clip_range_vf is not None:
+                    value_pred_clipped = batch_old_values + torch.clamp(
+                        values - batch_old_values,
+                        -self.clip_range_vf,
+                        self.clip_range_vf,
+                    )
+                    value_loss_unclipped = (values.squeeze(-1) - batch_returns) ** 2
+                    value_loss_clipped = (value_pred_clipped - batch_returns) ** 2
+                    value_loss = (
+                        0.5 * torch.max(value_loss_unclipped, value_loss_clipped).mean()
+                    )
+                else:
+                    value_loss = F.mse_loss(values.squeeze(-1), batch_returns)
 
                 entropy_loss = entropy.mean()
 
