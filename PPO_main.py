@@ -28,17 +28,14 @@ def make_env(gym_id, seed: Optional[int] = None):
 
 
 if __name__ == "__main__":
-    env_name = "Hopper"
-    env = make_env("Hopper-v5")
+    env_name = "Pendulum"
+    env = make_env("Pendulum-v1")
     env = env()
-    # eval_env = make_env("Hopper-v5")
+    # eval_env = make_env("Pendulum-v1")
     # eval_env = eval_env()
-    max_action = env.action_space.high[0]
 
-    n_epochs = 5
-    batch_size = 32
     episode_num = 15000
-    training_interval_step = 512
+    training_interval_step = 1000
     timeLimit = env.spec.max_episode_steps
 
     chkpt_dir = f"./results/{env_name}/models/PPO"
@@ -49,27 +46,24 @@ if __name__ == "__main__":
 
     logger = Logger(log_dir=f"./results/{env_name}/tb/PPO")
 
-    policy_kwargs = {
-        "feature": [],
-        "pi": [256] * 2,
-        "vf": [256] * 2,
-    }
-
     agent = Agent(
         state_dim=env.observation_space.shape[0],
         action_dim=env.action_space.shape[0],
-        policy_kwargs=policy_kwargs,
-        batch_size=batch_size,
-        n_epochs=n_epochs,
+        n_epochs=5,
+        batch_size=64,
         logger=logger,
         chkpt_dir=chkpt_dir,
-        ent_coef=0.00229519,
-        gae_lambda=0.99,
-        gamma=0.999,
-        lr=9.8e-5,
-        max_grad_norm=0.7,
-        clip_coef=0.2,
-        vf_coef=0.835671,
+        ent_coef=0.01,
+        gae_lambda=0.95,
+        gamma=0.99,
+        lr=3e-4,
+        max_grad_norm=0.5,
+        vf_coef=0.5,
+        policy_kwargs={
+            "feature": [],
+            "pi": [64] * 3,
+            "vf": [64] * 3,
+        },
     )
 
     # step_logger = StepLogger(logger, step_interval=1, suffix_title="eps")
@@ -92,7 +86,7 @@ if __name__ == "__main__":
             agent.policy.eval()
             with torch.no_grad():
                 action, value, logprob = agent.policy(state)
-            action = action.detach().cpu().numpy().squeeze()
+            action = action.detach().cpu().numpy().squeeze(0)
             logprob = logprob.detach().cpu().numpy()
             value = value.squeeze(0).detach().cpu().numpy()
 

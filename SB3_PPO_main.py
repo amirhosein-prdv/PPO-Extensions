@@ -8,17 +8,17 @@ from stable_baselines3.common.callbacks import (
     EvalCallback,
 )
 
-
-env = gym.make("Hopper-v5")
+env_name = "Pendulum"
+env = gym.make(f"{env_name}-v1")
 env = gym.wrappers.NormalizeObservation(env)
-eval_env = gym.make("Hopper-v5", render_mode="rgb_array")
+eval_env = gym.make(f"{env_name}-v1", render_mode="rgb_array")
 
 # Use deterministic actions for evaluation
 eval_callback = EvalCallback(
     eval_env,
-    best_model_save_path="./SB3_results/Hopper/models/",
-    log_path="./SB3_results/Hopper/logs/",
-    eval_freq=500,
+    best_model_save_path=f"./SB3_results/{env_name}/models/",
+    log_path=f"./SB3_results/{env_name}/logs/",
+    eval_freq=2000,
     deterministic=True,
     render=True,
     verbose=0,
@@ -27,8 +27,8 @@ eval_callback = EvalCallback(
 # Save a checkpoint every 1000 steps
 # checkpoint_callback = CheckpointCallback(
 #     save_freq=1000,
-#     save_path="./SB3_results/Hopper/models/",
-#     name_prefix="hopper_model",
+#     save_path=f"./SB3_results/{env_name}/models/",
+#     name_prefix=f"{env_name}_model",
 #     save_replay_buffer=True,
 #     save_vecnormalize=True,
 # )
@@ -40,38 +40,42 @@ callback = CallbackList(
     ]
 )
 
-policy_kwargs = dict(net_arch=[256] * 2)
 model = PPO(
     "MlpPolicy",
     env=env,
-    n_steps=1024,
+    n_steps=1000,
     verbose=0,
-    policy_kwargs=policy_kwargs,
-    tensorboard_log="./SB3_results/Hopper/tb/",
-    ent_coef=0.00229519,
-    gae_lambda=0.99,
-    gamma=0.999,
-    learning_rate=9.8e-5,
-    max_grad_norm=0.7,
+    tensorboard_log=f"./SB3_results/{env_name}/tb/",
+    ent_coef=0.01,
+    gae_lambda=0.95,
+    gamma=0.99,
+    learning_rate=3e-4,
+    max_grad_norm=0.5,
     clip_range=0.2,
-    vf_coef=0.835671,
+    vf_coef=0.5,
+    policy_kwargs=dict(
+        net_arch=dict(
+            pi=[64] * 3,
+            vf=[64] * 3,
+        )
+    ),
 )
 
 model.learn(
     total_timesteps=4_500_000,
-    tb_log_name="Hopper-ppo",
+    tb_log_name=f"{env_name}-ppo",
     progress_bar=True,
     callback=callback,
 )
 
 
 # model = PPO.load(
-#     "./SB3_results/Hopper/models/best_model.zip",
+#     f"./SB3_results/"env_name"/models/best_model.zip",
 # )
 
 eval_env = Monitor(eval_env)
 eval_env = gym.wrappers.RecordVideo(
-    eval_env, "./SB3_results/Hopper/Video_4/", lambda x: True
+    eval_env, f"./SB3_results/{env_name}/Video/", lambda x: True
 )
 mean_reward, std_reward = evaluate_policy(model, eval_env, n_eval_episodes=5)
 print(f"Mean reward: {mean_reward}, Std: {std_reward}")
