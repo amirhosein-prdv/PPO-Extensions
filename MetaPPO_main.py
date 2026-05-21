@@ -1,8 +1,8 @@
 from MetaPPO.MakeEnv import *
-from MetaPPO.MAML_PPO import MAMLPPO as Meta
 
-# from MetaPPO.MAML_TRPO import MAMLTRPO as Meta
-# from MetaPPO.Reptile_PPO import ReptilePPO as Meta
+from MetaPPO.MAML_PPO import MAMLPPO
+from MetaPPO.MAML_TRPO import MAMLTRPO
+from MetaPPO.Reptile_PPO import ReptilePPO
 
 
 def env_factory():
@@ -29,7 +29,29 @@ if __name__ == "__main__":
     # ----------------------------
     # MAML MODEL
     # ----------------------------
-    maml = Meta(
+    meta_trpo = MAMLTRPO(
+        env_fn=env_factory,
+        state_dim=state_dim,
+        action_dim=action_dim,
+        inner_lr=1e-4,
+        inner_vf_coef=0.0,
+        inner_ent_coef=1e-5,
+        meta_lr=1e-3,
+        meta_vf_coef=0.5,
+        meta_ent_coef=1e-5,
+        inner_steps=1,
+        outer_batch_size=10,
+        traj_per_task=10,
+        max_steps=500,
+        policy_kwargs={
+            "feature": [],
+            "pi": [128, 128],
+            "vf": [128, 128],
+        },
+        # second_order=True,
+    )
+
+    meta_ppo = MAMLPPO(
         env_fn=env_factory,
         state_dim=state_dim,
         action_dim=action_dim,
@@ -51,10 +73,33 @@ if __name__ == "__main__":
         second_order=True,
     )
 
+    meta_reptile = ReptilePPO(
+        env_fn=env_factory,
+        state_dim=state_dim,
+        action_dim=action_dim,
+        inner_lr=1e-4,
+        inner_vf_coef=0.5,
+        inner_ent_coef=1e-5,
+        meta_lr=1e-3,
+        meta_vf_coef=0.5,
+        meta_ent_coef=1e-5,
+        inner_steps=1,
+        inner_epochs=4,
+        inner_batch_size=256,
+        outer_batch_size=10,
+        traj_per_task=10,
+        max_steps=500,
+        policy_kwargs={
+            "feature": [],
+            "pi": [128, 128],
+            "vf": [128, 128],
+        },
+    )
+
     # ----------------------------
     # TRAINING
     # ----------------------------
     print("\n=== Training MAML ===")
-    maml.meta_train(
+    meta_reptile.meta_train(
         num_meta_iterations=1000, eval_interval=1, eval_env_fn=eval_env_factory
     )
