@@ -66,7 +66,8 @@ class PPOAgent:
         old_values = torch.cat([t["values"] for t in trajectories])
 
         # Normalize advantages
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        if self.normalize_advantage:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         total_loss = 0.0
         total_policy_loss = 0.0
