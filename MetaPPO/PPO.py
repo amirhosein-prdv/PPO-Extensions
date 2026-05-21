@@ -5,7 +5,7 @@ import torch.optim as optim
 import gymnasium as gym
 from typing import List, Tuple, Dict
 
-from .Networks_simple import ActorCriticNetwork
+from .Networks import ActorCriticNetwork
 
 
 # -------------------- PPO Agent for Continuous Actions (Inner Loop) --------------------
