@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import gymnasium as gym
-from typing import List, Tuple, Dict, Optional, Union
+from typing import List, Tuple, Dict, Optional, Union, Callable
 
 from .PPO import PPOAgent
 from .Networks import ActorCriticNetwork
@@ -326,39 +326,106 @@ class ReptilePPO:
 
         return agent, avg_stats
 
-    def evaluate(self, env_fn, num_episodes: int = 5, adaptation_steps: int = 3):
-        """Evaluate the meta-learned policy on new tasks."""
-        total_rewards = []
+    def evaluate(
+        self,
+        env_fn: Callable[[], gym.Env],
+        num_episodes: int = 5,
+        adaptation_steps: int = 3,
+        num_trajectories: int = 5,
+    ) -> float:
 
-        for episode in range(num_episodes):
+        rewards_before = []
+        rewards_after = []
+        all_inner_stats = []
+
+        for _ in range(num_episodes):
+
             env = env_fn()
-            agent, stats = self.adapt_to_new_task(
-                env, adaptation_steps=adaptation_steps
-            )
 
-            # Test the adapted policy
+            # BEFORE ADAPTATION
             state, _ = env.reset()
-            episode_reward = 0
+            episode_reward_before = 0.0
+
             for _ in range(self.max_steps):
-                state_t = torch.FloatTensor(state).unsqueeze(0)
+
                 with torch.no_grad():
-                    action, _ = agent.policy.get_action(state_t, deterministic=True)
-                state, reward, terminated, truncated, _ = env.step(
+                    action, _ = self.base_policy.get_action(
+                        state,
+                        deterministic=True,
+                    )
+
+                next_state, reward, terminated, truncated, _ = env.step(
                     action.squeeze(0).cpu().numpy()
                 )
-                done = terminated or truncated
-                episode_reward += reward
-                if done:
+
+                episode_reward_before += reward
+                state = next_state
+
+                if terminated or truncated:
                     break
 
-            total_rewards.append(episode_reward)
+            rewards_before.append(episode_reward_before)
+
+            # ADAPTATION
+            agent, stats = self.adapt_to_new_task(
+                env,
+                adaptation_steps=adaptation_steps,
+                num_trajectories=num_trajectories,
+            )
+            all_inner_stats.append(stats)
+
+            # AFTER ADAPTATION
+            state, _ = env.reset()
+            episode_reward_after = 0.0
+
+            for _ in range(self.max_steps):
+
+                with torch.no_grad():
+                    action, _ = agent.policy.get_action(
+                        state,
+                        deterministic=True,
+                    )
+
+                next_state, reward, terminated, truncated, _ = env.step(
+                    action.squeeze(0).cpu().numpy()
+                )
+
+                episode_reward_after += reward
+                state = next_state
+
+                if terminated or truncated:
+                    break
+
+            rewards_after.append(episode_reward_after)
+
             env.close()
 
-        avg_reward = np.mean(total_rewards)
+        rewards_before = np.array(rewards_before)
+        rewards_after = np.array(rewards_after)
+
+        improvement = rewards_after - rewards_before
+
+        avg_stats = {
+            key: np.mean([s[key] for s in all_inner_stats])
+            for key in all_inner_stats[0].keys()
+        }
+
+        print("Evaluation:", end=" ")
         print(
-            f"Evaluation: Avg Reward = {avg_reward:.2f} ± {np.std(total_rewards):.2f}"
+            f"Before adaptation: "
+            f"{rewards_before.mean():.2f} ± {rewards_before.std():.2f}",
+            end=" | ",
         )
-        return avg_reward
+        print(
+            f"After adaptation: "
+            f"{rewards_after.mean():.2f} ± {rewards_after.std():.2f}",
+            end="\n" + " " * 12,
+        )
+        print(
+            f"Improvement: {improvement.mean():.2f} ± {improvement.std():.2f}",
+            end=" | ",
+        )
+        print(f"Success rate (+): {(improvement > 0).mean() * 100:.1f} %")
 
     def _clone_policy(self) -> ActorCriticNetwork:
         """
