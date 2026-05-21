@@ -295,7 +295,7 @@ class ReptilePPO:
 
     def adapt_to_new_task(
         self, task_env: gym.Env, adaptation_steps: int = 5, num_trajectories: int = 5
-    ) -> PPOAgent:
+    ) -> Tuple[PPOAgent, Dict]:
         """Quickly adapt the base policy to a new task."""
         agent = PPOAgent(
             self.state_dim,
