@@ -88,7 +88,7 @@ class MAMLPPO:
             # Sample a batch of tasks
             task_envs = [self.env_fn() for _ in range(self.outer_batch_size)]
 
-            all_stats = []
+            all_inner_stats = []
             task_gradients = []
             for task_idx, task_env in enumerate(task_envs):
 
@@ -98,8 +98,8 @@ class MAMLPPO:
                 }
 
                 # ----- Differentiable inner adaptation -----
-                adapted_params, stats = self._inner_update(task_env, base_params)
-                all_stats.append(stats)
+                adapted_params, inner_stats = self._inner_update(task_env, base_params)
+                all_inner_stats.append(inner_stats)
 
                 # ----- Collect QUERY trajectories using the adapted policy -----
                 query_trajs = []
@@ -156,8 +156,8 @@ class MAMLPPO:
 
             if iteration % eval_interval == 0:
                 avg_stats = {
-                    key: np.mean([s[key] for s in all_stats])
-                    for key in all_stats[0].keys()
+                    key: np.mean([s[key] for s in all_inner_stats])
+                    for key in all_inner_stats[0].keys()
                 }
                 print(
                     f"\nIteration {iteration}: ",
@@ -193,7 +193,7 @@ class MAMLPPO:
         # Clone base parameters
         fast_params = {k: v.clone() for k, v in base_params.items()}
 
-        all_stats = []
+        all_inner_stats = []
         for _ in range(self.inner_steps):
 
             # Collect support trajectories using the current policy
@@ -226,10 +226,11 @@ class MAMLPPO:
                 else:
                     raise ValueError("Inner update: Gradient is None")
 
-            all_stats.append(stats)
+            all_inner_stats.append(stats)
 
         avg_stats = {
-            key: np.mean([s[key] for s in all_stats]) for key in all_stats[0].keys()
+            key: np.mean([s[key] for s in all_inner_stats])
+            for key in all_inner_stats[0].keys()
         }
 
         # this is still differentiable w.r.t base_policy
@@ -527,7 +528,7 @@ class MAMLPPO:
 
         rewards_before = []
         rewards_after = []
-        all_stats = []
+        all_inner_stats = []
 
         for _ in range(num_episodes):
 
@@ -563,7 +564,7 @@ class MAMLPPO:
                 adaptation_steps=adaptation_steps,
                 num_trajectories=num_trajectories,
             )
-            all_stats.append(stats)
+            all_inner_stats.append(stats)
 
             # AFTER ADAPTATION
             state, _ = env.reset()
@@ -597,7 +598,8 @@ class MAMLPPO:
         improvement = rewards_after - rewards_before
 
         avg_stats = {
-            key: np.mean([s[key] for s in all_stats]) for key in all_stats[0].keys()
+            key: np.mean([s[key] for s in all_inner_stats])
+            for key in all_inner_stats[0].keys()
         }
 
         print("Evaluation:", end=" ")
