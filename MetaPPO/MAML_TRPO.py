@@ -7,6 +7,7 @@ import gymnasium as gym
 from typing import List, Dict, Tuple, Optional, Callable
 
 from .Networks import ActorCriticNetwork
+from .logger import Logger
 
 
 class MAMLTRPO:
@@ -37,6 +38,7 @@ class MAMLTRPO:
         residual_tol: float = 1e-10,
         backtrack_coeff: float = 0.8,
         backtrack_iters: int = 10,
+        logger: Optional[Logger] = None,
     ):
         self.env_fn = env_fn
         self.state_dim = state_dim
@@ -69,6 +71,7 @@ class MAMLTRPO:
             self.base_policy.critic.parameters(), lr=meta_lr
         )
         self.device = self.base_policy.device
+        self.logger = logger
 
     # ====================================================================
     #  Meta-training loop
@@ -82,6 +85,8 @@ class MAMLTRPO:
         print("Starting MAML-TRPO meta-training...")
 
         for iteration in range(num_meta_iterations):
+            self.logger.update_global_step(iteration) if self.logger else None
+
             # Sample a batch of tasks
             task_envs = [self.env_fn() for _ in range(self.outer_batch_size)]
 
@@ -138,19 +143,32 @@ class MAMLTRPO:
 
             meta_stats = self._outer_step(all_query_data)
 
+            avg_inner_stats = {
+                k: np.mean([s[k] for s in all_inner_stats]) for k in all_inner_stats[0]
+            }
+
+            if self.logger is not None:
+                self.logger.add_scalar("Meta Loss/policy", meta_stats["policy_loss"])
+                self.logger.add_scalar("Meta Loss/value", meta_stats["value_loss"])
+                self.logger.add_scalar("Meta Loss/entropy", meta_stats["entropy"])
+                self.logger.add_scalar(
+                    "Inner Loss/policy", avg_inner_stats["policy_loss"]
+                )
+                self.logger.add_scalar(
+                    "Inner Loss/value", avg_inner_stats["value_loss"]
+                )
+                self.logger.add_scalar("Inner Loss/entropy", avg_inner_stats["entropy"])
+
             if iteration % eval_interval == 0:
-                avg_inner = {
-                    k: np.mean([s[k] for s in all_inner_stats])
-                    for k in all_inner_stats[0]
-                }
+
                 print(
                     f"\nIteration {iteration}:",
                     f"\nMeta  Loss: policy={meta_stats['policy_loss']:.5f}  "
                     f"value={meta_stats['value_loss']:.5f}  "
                     f"entropy={meta_stats['entropy']:.5f}",
-                    f"\nInner Loss: policy={avg_inner['policy_loss']:.5f}  "
-                    f"value={avg_inner['value_loss']:.3f}  "
-                    f"entropy={avg_inner['entropy']:.3f}",
+                    f"\nInner Loss: policy={avg_inner_stats['policy_loss']:.5f}  "
+                    f"value={avg_inner_stats['value_loss']:.3f}  "
+                    f"entropy={avg_inner_stats['entropy']:.3f}",
                 )
                 if eval_env_fn:
                     self.evaluate(
@@ -786,6 +804,13 @@ class MAMLTRPO:
 
         rb, ra = np.array(rb), np.array(ra)
         imp = ra - rb
+
+        if self.logger is not None:
+            self.logger.add_scalar("Evaluation/Reward Before", rb.mean())
+            self.logger.add_scalar("Evaluation/Reward After", ra.mean())
+            self.logger.add_scalar("Evaluation/Reward Improvement", imp.mean())
+            self.logger.add_scalar("Evaluation/Success Rate", (imp > 0).mean() * 100)
+
         print(
             f"Evaluation: Before {rb.mean():.2f}±{rb.std():.2f} | "
             f"After {ra.mean():.2f}±{ra.std():.2f} | "

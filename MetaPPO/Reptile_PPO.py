@@ -10,6 +10,7 @@ from typing import List, Tuple, Dict, Optional, Union, Callable
 
 from .PPO import PPOAgent
 from .Networks import ActorCriticNetwork
+from .logger import Logger
 
 
 # -------------------- Reptile Meta-Learner (PPO in outer Loop) --------------------
@@ -48,6 +49,7 @@ class ReptilePPO:
             "pi": [64, 64],
             "vf": [64, 64],
         },
+        logger: Optional[Logger] = None,
     ):
         """
         Args:
@@ -94,9 +96,7 @@ class ReptilePPO:
         self.meta_optimizer = optim.Adam(self.base_policy.parameters(), lr=meta_lr)
 
         self.device = self.base_policy.device
-
-        # Store training metrics
-        self.meta_losses = []
+        self.logger = logger
 
     def meta_train(
         self,
@@ -108,6 +108,8 @@ class ReptilePPO:
         print("Starting meta-training...")
 
         for iteration in range(num_meta_iterations):
+            self.logger.update_global_step(iteration) if self.logger else None
+
             # Sample a batch of tasks
             task_envs = [self.env_fn() for _ in range(self.outer_batch_size)]
             all_inner_stats = []
@@ -168,6 +170,20 @@ class ReptilePPO:
             }
 
             # Logging
+            if self.logger is not None:
+                self.logger.add_scalar(
+                    "Meta Loss/policy", avg_meta_stats["policy_loss"]
+                )
+                self.logger.add_scalar("Meta Loss/value", avg_meta_stats["value_loss"])
+                self.logger.add_scalar("Meta Loss/entropy", avg_meta_stats["entropy"])
+                self.logger.add_scalar(
+                    "Inner Loss/policy", avg_inner_stats["policy_loss"]
+                )
+                self.logger.add_scalar(
+                    "Inner Loss/value", avg_inner_stats["value_loss"]
+                )
+                self.logger.add_scalar("Inner Loss/entropy", avg_inner_stats["entropy"])
+
             if iteration % eval_interval == 0:
                 print(
                     f"\nIteration {iteration}: ",
@@ -409,6 +425,14 @@ class ReptilePPO:
             key: np.mean([s[key] for s in all_inner_stats])
             for key in all_inner_stats[0].keys()
         }
+
+        if self.logger is not None:
+            self.logger.add_scalar("Evaluation/Reward Before", rewards_before.mean())
+            self.logger.add_scalar("Evaluation/Reward After", rewards_after.mean())
+            self.logger.add_scalar("Evaluation/Reward Improvement", improvement.mean())
+            self.logger.add_scalar(
+                "Evaluation/Success Rate", (improvement > 0).mean() * 100
+            )
 
         print("Evaluation:", end=" ")
         print(
