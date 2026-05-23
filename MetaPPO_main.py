@@ -4,6 +4,9 @@ from MetaPPO.MAML_PPO import MAMLPPO
 from MetaPPO.MAML_TRPO import MAMLTRPO
 from MetaPPO.Reptile_PPO import ReptilePPO
 
+from MetaPPO.logger import Logger
+from MetaPPO.utils import get_unique_log_dir
+
 
 def env_factory():
     # return create_pendulum_env()
@@ -25,6 +28,13 @@ if __name__ == "__main__":
     test_env.close()
 
     print(f"State dim: {state_dim}, Action dim: {action_dim}")
+
+    env_name = "Reach"
+    alg_name = "ReptilePPO"
+    chkpt_dir = f"./results/Meta/{alg_name}/{env_name}/models"
+    chkpt_dir = get_unique_log_dir(chkpt_dir)
+
+    logger = Logger(log_dir=f"./results/Meta/{alg_name}/{env_name}/tb")
 
     # ----------------------------
     # MAML MODEL
@@ -48,7 +58,8 @@ if __name__ == "__main__":
             "pi": [128, 128],
             "vf": [128, 128],
         },
-        # second_order=True,
+        second_order=True,
+        logger=logger,
     )
 
     meta_ppo = MAMLPPO(
@@ -71,6 +82,7 @@ if __name__ == "__main__":
             "vf": [128, 128],
         },
         second_order=True,
+        logger=logger,
     )
 
     meta_reptile = ReptilePPO(
@@ -94,6 +106,7 @@ if __name__ == "__main__":
             "pi": [128, 128],
             "vf": [128, 128],
         },
+        logger=logger,
     )
 
     # ----------------------------
