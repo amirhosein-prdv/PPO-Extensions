@@ -620,8 +620,15 @@ class MAMLPPO:
 
         if self.logger is not None:
             self.logger.add_scalar("Evaluation/Reward Before", rewards_before.mean())
+            self.logger.add_scalar(
+                "Evaluation/Reward Before (Std)", rewards_before.std()
+            )
             self.logger.add_scalar("Evaluation/Reward After", rewards_after.mean())
+            self.logger.add_scalar("Evaluation/Reward After (Std)", rewards_after.std())
             self.logger.add_scalar("Evaluation/Reward Improvement", improvement.mean())
+            self.logger.add_scalar(
+                "Evaluation/Reward Improvement (Std)", improvement.std()
+            )
             self.logger.add_scalar(
                 "Evaluation/Success Rate", (improvement > 0).mean() * 100
             )

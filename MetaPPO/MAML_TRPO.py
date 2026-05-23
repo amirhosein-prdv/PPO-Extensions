@@ -808,8 +808,11 @@ class MAMLTRPO:
 
         if self.logger is not None:
             self.logger.add_scalar("Evaluation/Reward Before", rb.mean())
+            self.logger.add_scalar("Evaluation/Reward Before (Std)", rb.std())
             self.logger.add_scalar("Evaluation/Reward After", ra.mean())
+            self.logger.add_scalar("Evaluation/Reward After (Std)", ra.std())
             self.logger.add_scalar("Evaluation/Reward Improvement", imp.mean())
+            self.logger.add_scalar("Evaluation/Reward Improvement (Std)", imp.std())
             self.logger.add_scalar("Evaluation/Success Rate", (imp > 0).mean() * 100)
 
         print(
