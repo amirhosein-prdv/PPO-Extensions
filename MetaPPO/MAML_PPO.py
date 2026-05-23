@@ -83,6 +83,7 @@ class MAMLPPO:
         num_meta_iterations: int = 100,
         eval_interval: int = 10,
         eval_env_fn: Optional[Callable] = None,
+        callbacks: Optional[List[Callable]] = None,
     ):
         """Main meta-training loop."""
         print("Starting MAML-PPO meta-training...")
