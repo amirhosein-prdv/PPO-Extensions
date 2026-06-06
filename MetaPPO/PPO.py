@@ -27,6 +27,7 @@ class PPOAgent:
         clip_range_vf: Union[None, float] = None,
         max_grad_norm: float = 0.5,
         normalize_advantage: bool = False,
+        normalize_return: bool = False,
         policy_kwargs: dict[str, List[int]] = {
             "feature": [],
             "pi": [64, 64],
@@ -43,6 +44,7 @@ class PPOAgent:
         self.clip_range_vf = clip_range_vf
         self.max_grad_norm = max_grad_norm
         self.normalize_advantage = normalize_advantage
+        self.normalize_return = normalize_return
 
         self.epochs = epochs
         self.batch_size = batch_size
@@ -68,6 +70,8 @@ class PPOAgent:
         # Normalize advantages
         if self.normalize_advantage:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        if self.normalize_return:
+            returns = (returns - returns.mean()) / (returns.std() + 1e-8)
 
         total_loss = 0.0
         total_policy_loss = 0.0
