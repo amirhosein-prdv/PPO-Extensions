@@ -30,13 +30,11 @@ class ReptilePPO:
         inner_vf_coef: float = 0.5,
         inner_ent_coef: float = 0.001,
         meta_lr: float = 1e-3,
-        meta_vf_coef: float = 0.5,
-        meta_ent_coef: float = 0.01,
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
         clip_epsilon: float = 0.2,
         clip_range_vf: Union[None, float] = None,
-        max_grad_norm: float = 1.0,
+        max_grad_norm: float = 0.5,
         normalize_advantage: bool = False,
         inner_steps: int = 5,
         inner_epochs: int = 4,
@@ -73,8 +71,6 @@ class ReptilePPO:
         self.inner_vf_coef = inner_vf_coef
         self.inner_ent_coef = inner_ent_coef
         self.meta_lr = meta_lr
-        self.meta_vf_coef = meta_vf_coef
-        self.meta_ent_coef = meta_ent_coef
 
         self.gamma = gamma
         self.gae_lambda = gae_lambda
@@ -93,7 +89,6 @@ class ReptilePPO:
 
         # Base policy (meta-initialization)
         self.base_policy = ActorCriticNetwork(state_dim, action_dim, policy_kwargs)
-        self.meta_optimizer = optim.Adam(self.base_policy.parameters(), lr=meta_lr)
 
         self.device = self.base_policy.device
         self.logger = logger
@@ -299,8 +294,8 @@ class ReptilePPO:
         # ----- Total Loss -----
         total_loss = (
             policy_loss
-            + self.meta_vf_coef * value_loss
-            - self.meta_ent_coef * entropy_loss
+            + self.inner_vf_coef * value_loss
+            - self.inner_ent_coef * entropy_loss
         )
 
         return {
@@ -353,7 +348,9 @@ class ReptilePPO:
 
         rewards_before = []
         rewards_after = []
-        all_inner_stats = []
+        steps_before = []
+        steps_after = []
+        all_stats = []
 
         for _ in range(num_episodes):
 
@@ -362,6 +359,7 @@ class ReptilePPO:
             # BEFORE ADAPTATION
             state, _ = env.reset()
             episode_reward_before = 0.0
+            episode_step = 0
 
             for _ in range(self.max_steps):
 
@@ -378,10 +376,12 @@ class ReptilePPO:
                 episode_reward_before += reward
                 state = next_state
 
+                episode_step += 1
                 if terminated or truncated:
                     break
 
             rewards_before.append(episode_reward_before)
+            steps_before.append(episode_step)
 
             # ADAPTATION
             agent, stats = self.adapt_to_new_task(
@@ -389,11 +389,12 @@ class ReptilePPO:
                 adaptation_steps=adaptation_steps,
                 num_trajectories=num_trajectories,
             )
-            all_inner_stats.append(stats)
+            all_stats.append(stats)
 
             # AFTER ADAPTATION
             state, _ = env.reset()
             episode_reward_after = 0.0
+            episode_step = 0
 
             for _ in range(self.max_steps):
 
@@ -410,24 +411,40 @@ class ReptilePPO:
                 episode_reward_after += reward
                 state = next_state
 
+                episode_step += 1
                 if terminated or truncated:
                     break
 
             rewards_after.append(episode_reward_after)
+            steps_after.append(episode_step)
 
             env.close()
 
         rewards_before = np.array(rewards_before)
         rewards_after = np.array(rewards_after)
+        steps_before = np.array(steps_before)
+        steps_after = np.array(steps_after)
+
+        avg_rewards_before = rewards_before / steps_before
+        avg_rewards_after = rewards_after / steps_after
 
         improvement = rewards_after - rewards_before
 
         avg_stats = {
-            key: np.mean([s[key] for s in all_inner_stats])
-            for key in all_inner_stats[0].keys()
+            key: np.mean([s[key] for s in all_stats]) for key in all_stats[0].keys()
         }
 
         if self.logger is not None:
+            self.logger.add_scalar(
+                "Evaluation/Average Step Before", steps_before.mean()
+            )
+            self.logger.add_scalar("Evaluation/Average Step After", steps_after.mean())
+            self.logger.add_scalar(
+                "Evaluation/Average Reward Before", avg_rewards_before.mean()
+            )
+            self.logger.add_scalar(
+                "Evaluation/Average Reward After", avg_rewards_after.mean()
+            )
             self.logger.add_scalar("Evaluation/Reward Before", rewards_before.mean())
             self.logger.add_scalar(
                 "Evaluation/Reward Before (Std)", rewards_before.std()
