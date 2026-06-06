@@ -3,6 +3,7 @@ from MetaPPO.MakeEnv import *
 from MetaPPO.MAML_PPO import MAMLPPO
 from MetaPPO.MAML_TRPO import MAMLTRPO
 from MetaPPO.Reptile_PPO import ReptilePPO
+from MetaPPO.SB3_Reptile_PPO import SB3ReptilePPO
 
 from MetaPPO.logger import Logger
 from MetaPPO.utils import get_unique_log_dir
@@ -109,10 +110,45 @@ if __name__ == "__main__":
         logger=logger,
     )
 
+    sb3_meta_reptile = SB3ReptilePPO(
+        env_fn=env_factory,
+        inner_lr=3e-4,
+        meta_lr=1e-4,
+        inner_vf_coef=0.5,
+        inner_ent_coef=0.0,
+        inner_epochs=4,
+        inner_batch_size=64,
+        outer_batch_size=4,
+        traj_per_task=4,
+        policy_kwargs={
+            "feature": [],
+            "pi": [256, 256],
+            "vf": [256, 256],
+        },
+        normalize_advantage=True,
+        logger=logger,
+        verbose=True,
+    )
+
     # ----------------------------
     # TRAINING
     # ----------------------------
-    print("\n=== Training MAML ===")
-    meta_reptile.meta_train(
-        num_meta_iterations=1000, eval_interval=1, eval_env_fn=eval_env_factory
-    )
+    print(f"\n=== Training Meta-Learning with {alg_name} algorithm. ===")
+
+    match alg_name:
+        case "MetaTRPO":
+            meta_trpo.meta_train(
+                num_meta_iterations=1000, eval_interval=1, eval_env_fn=eval_env_factory
+            )
+        case "MetaPPO":
+            meta_ppo.meta_train(
+                num_meta_iterations=1000, eval_interval=1, eval_env_fn=eval_env_factory
+            )
+        case "ReptilePPO":
+            meta_reptile.meta_train(
+                num_meta_iterations=1000, eval_interval=1, eval_env_fn=eval_env_factory
+            )
+        case "SB3ReptilePPO":
+            sb3_meta_reptile.meta_train(
+                num_meta_iterations=1000, eval_interval=1, eval_env_fn=eval_env_factory
+            )
