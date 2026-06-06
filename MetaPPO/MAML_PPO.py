@@ -29,6 +29,7 @@ class MAMLPPO:
         clip_range_vf: Union[None, float] = None,
         max_grad_norm: float = 1.0,
         normalize_advantage: bool = False,
+        normalize_return: bool = False,
         inner_steps: int = 2,  # number of inner PPO updates
         outer_batch_size: int = 10,  # number of tasks per meta-batch
         max_steps: int = 200,
@@ -59,7 +60,7 @@ class MAMLPPO:
         self.clip_range_vf = clip_range_vf
         self.max_grad_norm = max_grad_norm
         self.normalize_advantage = normalize_advantage
-
+        self.normalize_return = normalize_return
         self.max_steps = max_steps
         self.inner_steps = inner_steps
         self.outer_batch_size = outer_batch_size
@@ -508,9 +509,11 @@ class MAMLPPO:
         old_logprobs = torch.cat([t["logprobs"] for t in trajectories]).to(self.device)
         old_values = torch.cat([t["values"] for t in trajectories]).to(self.device)
 
-        # Normalize advantages
+        # Normalize advantages and returns
         if self.normalize_advantage:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        if self.normalize_return:
+            returns = (returns - returns.mean()) / (returns.std() + 1e-8)
 
         if batch_idxs is not None:
             return {
