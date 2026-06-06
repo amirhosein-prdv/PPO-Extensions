@@ -36,6 +36,7 @@ class ReptilePPO:
         clip_range_vf: Union[None, float] = None,
         max_grad_norm: float = 0.5,
         normalize_advantage: bool = False,
+        normalize_return: bool = False,
         inner_steps: int = 5,
         inner_epochs: int = 4,
         inner_batch_size: int = 64,
@@ -78,6 +79,7 @@ class ReptilePPO:
         self.clip_range_vf = clip_range_vf
         self.max_grad_norm = max_grad_norm
         self.normalize_advantage = normalize_advantage
+        self.normalize_return = normalize_return
 
         self.max_steps = max_steps
         self.inner_steps = inner_steps
@@ -226,20 +228,22 @@ class ReptilePPO:
             clip_range_vf=self.clip_range_vf,
             max_grad_norm=self.max_grad_norm,
             normalize_advantage=self.normalize_advantage,
+            normalize_return=self.normalize_return,
             policy_kwargs=self.policy_kwargs,
         )
         agent.policy = deepcopy(base_policy)
         agent.optimizer = optim.Adam(agent.policy.parameters(), lr=self.inner_lr)
 
-        # Collect support trajectories for inner update
-        support_trajectories = []
-        for _ in range(self.traj_per_task):
-            traj = agent.collect_trajectory(task_env, self.max_steps)
-            support_trajectories.append(traj)
-
         # Perform inner loop updates
         all_stats = []
         for step in range(self.inner_steps):
+
+            # Collect support trajectories for inner update
+            support_trajectories = []
+            for _ in range(self.traj_per_task):
+                traj = agent.collect_trajectory(task_env, self.max_steps)
+                support_trajectories.append(traj)
+
             stats = agent.update(support_trajectories)
             all_stats.append(stats)
 
@@ -271,6 +275,8 @@ class ReptilePPO:
         # Normalize advantages
         if self.normalize_advantage:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        if self.normalize_return:
+            returns = (returns - returns.mean()) / (returns.std() + 1e-8)
 
         # Compute policy loss on query set
         values, new_logprobs, entropy = policy.evaluate_action(states, actions)
