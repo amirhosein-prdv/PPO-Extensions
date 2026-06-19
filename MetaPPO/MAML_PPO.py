@@ -97,12 +97,13 @@ class MAMLPPO:
 
             all_inner_stats = []
             task_gradients = []
-            for task_idx, task_env in enumerate(task_envs):
 
-                base_params = {
-                    k: v.clone().detach().requires_grad_(True)
-                    for k, v in self.base_policy.named_parameters()
-                }
+            base_params = {
+                k: v.clone().detach().requires_grad_(True)
+                for k, v in self.base_policy.named_parameters()
+            }
+
+            for task_idx, task_env in enumerate(task_envs):
 
                 # ----- Differentiable inner adaptation -----
                 adapted_params, inner_stats = self._inner_update(task_env, base_params)
@@ -117,12 +118,12 @@ class MAMLPPO:
                 data = self._flatten_trajectories(query_trajs)
 
                 # ----- Compute meta-loss on query set -----
-                # task_meta_loss, meta_stats = self._reinforce_loss(
-                #     data, adapted_params, looptype="outer"
-                # )
-                task_meta_loss, meta_stats = self._ppo_loss(
+                task_meta_loss, meta_stats = self._vpg_loss(
                     data, adapted_params, looptype="outer"
                 )
+                # task_meta_loss, meta_stats = self._ppo_loss(
+                #     data, adapted_params, looptype="outer"
+                # )
 
                 # ----- Compute gradients for this task -----
                 if self.second_order:
@@ -179,8 +180,8 @@ class MAMLPPO:
                 print(
                     f"\nIteration {iteration}: ",
                     f"\nMeta Loss: Policy Loss = {meta_stats['policy_loss']:.5f}, Value Loss = {meta_stats['value_loss']:.5f}, Entropy = {meta_stats['entropy']:.5f}",
-                    "\n" + " " * 12,
-                    f"Clipfrac = {meta_stats['clipfracs']:.5f}, Explained Var. = {meta_stats['explained_var']:.5f}, Approx KL. = {meta_stats['approx_kl']:.5e}.",
+                    # "\n" + " " * 12,
+                    # f"Clipfrac = {meta_stats['clipfracs']:.5f}, Explained Var. = {meta_stats['explained_var']:.5f}, Approx KL. = {meta_stats['approx_kl']:.5e}.",
                     f"\nInner Loss: Policy Loss = {avg_stats['policy_loss']:.5f}, Value Loss = {avg_stats['value_loss']:.3f}, Entropy = {avg_stats['entropy']:.3f}.",
                     # "\n" + " " * 12,
                     # f"Clipfrac = {avg_stats['clipfracs']:.5f}, Explained Var. = {avg_stats['explained_var']:.5f}, Approx KL. = {avg_stats['approx_kl']:.5e}.",
@@ -221,7 +222,7 @@ class MAMLPPO:
             data = self._flatten_trajectories(support_trajs)
 
             # Calculate loss on support set
-            loss, stats = self._reinforce_loss(data, fast_params, looptype="inner")
+            loss, stats = self._vpg_loss(data, fast_params, looptype="inner")
 
             # Compute gradients w.r.t fast_params
             grads = torch.autograd.grad(
@@ -340,7 +341,7 @@ class MAMLPPO:
 
         return total_loss, stats
 
-    def _reinforce_loss(
+    def _vpg_loss(
         self,
         data: Dict[str, torch.Tensor],
         params: Dict[str, torch.Tensor],
@@ -547,6 +548,8 @@ class MAMLPPO:
 
         rewards_before = []
         rewards_after = []
+        steps_before = []
+        steps_after = []
         all_inner_stats = []
 
         for _ in range(num_episodes):
@@ -556,7 +559,7 @@ class MAMLPPO:
             # BEFORE ADAPTATION
             state, _ = env.reset()
             episode_reward_before = 0.0
-
+            episode_step = 0
             for _ in range(self.max_steps):
 
                 with torch.no_grad():
@@ -572,10 +575,12 @@ class MAMLPPO:
                 episode_reward_before += reward
                 state = next_state
 
+                episode_step += 1
                 if terminated or truncated:
                     break
 
             rewards_before.append(episode_reward_before)
+            steps_before.append(episode_step)
 
             # ADAPTATION
             adapted_policy, stats = self.adapt_to_new_task(
@@ -588,7 +593,7 @@ class MAMLPPO:
             # AFTER ADAPTATION
             state, _ = env.reset()
             episode_reward_after = 0.0
-
+            episode_step = 0
             for _ in range(self.max_steps):
 
                 with torch.no_grad():
@@ -604,15 +609,22 @@ class MAMLPPO:
                 episode_reward_after += reward
                 state = next_state
 
+                episode_step += 1
                 if terminated or truncated:
                     break
 
             rewards_after.append(episode_reward_after)
+            steps_after.append(episode_step)
 
             env.close()
 
         rewards_before = np.array(rewards_before)
         rewards_after = np.array(rewards_after)
+        steps_before = np.array(steps_before)
+        steps_after = np.array(steps_after)
+
+        avg_rewards_before = rewards_before / steps_before
+        avg_rewards_after = rewards_after / steps_after
 
         improvement = rewards_after - rewards_before
 
@@ -622,6 +634,16 @@ class MAMLPPO:
         }
 
         if self.logger is not None:
+            self.logger.add_scalar(
+                "Evaluation/Average Step Before", steps_before.mean()
+            )
+            self.logger.add_scalar("Evaluation/Average Step After", steps_after.mean())
+            self.logger.add_scalar(
+                "Evaluation/Average Reward Before", avg_rewards_before.mean()
+            )
+            self.logger.add_scalar(
+                "Evaluation/Average Reward After", avg_rewards_after.mean()
+            )
             self.logger.add_scalar("Evaluation/Reward Before", rewards_before.mean())
             self.logger.add_scalar(
                 "Evaluation/Reward Before (Std)", rewards_before.std()
