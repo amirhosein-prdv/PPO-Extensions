@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Normal
+from collections import OrderedDict
 from typing import List, Tuple, Dict, Optional
 
 
@@ -22,14 +23,17 @@ class Actor(nn.Module):
         output_dim: int,
         fc_dims: List[int],
         log_std_init: float = -0.5,
+        activation_fn: nn.Module = nn.Tanh,
     ) -> None:
         super(Actor, self).__init__()
+
+        self.activation_fn = activation_fn
 
         layers = []
         in_features = input_dim
         for out_features in fc_dims:
             layers.append(layer_init(nn.Linear(in_features, out_features)))
-            layers.append(nn.Tanh())
+            layers.append(self.activation_fn())
             in_features = out_features
         layers.append(layer_init(nn.Linear(in_features, output_dim), std=0.01))
         # layers.append(nn.Tanh())
@@ -69,8 +73,8 @@ class Actor(nn.Module):
                 w_key = f"{prefix}.{idx}.weight"
                 b_key = f"{prefix}.{idx}.bias"
                 x = F.linear(x, params[w_key], params[b_key])
-            elif isinstance(submodule, nn.Tanh):
-                x = torch.tanh(x)
+            elif isinstance(submodule, self.activation_fn.__class__):
+                x = self.activation_fn(x)
             else:
                 raise TypeError(f"Unsupported layer type: {type(submodule)}")
         return x
@@ -81,14 +85,17 @@ class Critic(nn.Module):
         self,
         input_dim: int,
         fc_dims: List[int],
+        activation_fn: nn.Module = nn.Tanh,
     ) -> None:
         super(Critic, self).__init__()
+
+        self.activation_fn = activation_fn
 
         layers = []
         in_features = input_dim
         for out_features in fc_dims:
             layers.append(layer_init(nn.Linear(in_features, out_features)))
-            layers.append(nn.Tanh())
+            layers.append(self.activation_fn())
             in_features = out_features
         layers.append(layer_init(nn.Linear(in_features, 1), std=1.0))
 
@@ -116,8 +123,8 @@ class Critic(nn.Module):
                 w_key = f"{prefix}.{idx}.weight"
                 b_key = f"{prefix}.{idx}.bias"
                 x = F.linear(x, params[w_key], params[b_key])
-            elif isinstance(submodule, nn.Tanh):
-                x = torch.tanh(x)
+            elif isinstance(submodule, self.activation_fn.__class__):
+                x = self.activation_fn(x)
             else:
                 raise TypeError(f"Unsupported layer type: {type(submodule)}")
         return x
@@ -136,6 +143,7 @@ class ActorCriticNetwork(nn.Module):
             "feature": [],
             "pi": [64, 64],
             "vf": [64, 64],
+            "activation_fn": nn.Tanh,
         },
     ):
         super().__init__()
@@ -143,6 +151,7 @@ class ActorCriticNetwork(nn.Module):
         feature_fc_dims = policy_kwargs["feature"]
         actor_fc_dims = policy_kwargs["pi"]
         critic_fc_dims = policy_kwargs["vf"]
+        self.activation_fn = policy_kwargs["activation_fn"]
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -152,7 +161,7 @@ class ActorCriticNetwork(nn.Module):
             in_features = state_dim
             for out_features in feature_fc_dims:
                 layers.append(layer_init(nn.Linear(in_features, out_features)))
-                layers.append(nn.Tanh())
+                layers.append(self.activation_fn())
                 in_features = out_features
             self.feature_extractor = nn.Sequential(*layers)
             input_dim = feature_fc_dims[-1]
@@ -161,10 +170,14 @@ class ActorCriticNetwork(nn.Module):
             input_dim = state_dim
 
         # Actor head
-        self.actor = Actor(input_dim, action_dim, actor_fc_dims)
+        self.actor = Actor(
+            input_dim, action_dim, actor_fc_dims, activation_fn=self.activation_fn
+        )
 
         # Critic head
-        self.critic = Critic(input_dim, critic_fc_dims)
+        self.critic = Critic(
+            input_dim, critic_fc_dims, activation_fn=self.activation_fn
+        )
 
         self.to(self.device)
 
@@ -259,9 +272,18 @@ class ActorCriticNetwork(nn.Module):
                     )
             return x
 
+    def get_actor_parameters_dict(self) -> Dict[str, torch.Tensor]:
+        """Return only Actor parameters"""
+        params = OrderedDict()
+        for name, param in self.named_parameters():
+            # Include only actor and feature extractor, exclude value
+            if "critic" not in name:
+                params[name] = param
+        return params
+
     def get_parameters_dict(self) -> Dict[str, torch.Tensor]:
         """Return a flat dictionary of all parameters (names -> tensors)."""
-        return {name: param for name, param in self.named_parameters()}
+        return OrderedDict({name: param for name, param in self.named_parameters()})
 
     def load_parameters_dict(self, params: Dict[str, torch.Tensor]) -> None:
         """Load parameters from a dictionary (for cloning or evaluation)."""
