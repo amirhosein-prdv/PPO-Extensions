@@ -592,7 +592,7 @@ class MAML:
             steps_before.append(episode_step)
 
             # ADAPTATION
-            adapted_policy, stats = self.adapt_to_new_task(
+            adapted_params, stats = self.adapt_to_new_task(
                 env,
                 adaptation_steps=adaptation_steps,
                 num_trajectories=num_trajectories,
@@ -606,8 +606,9 @@ class MAML:
             for _ in range(self.max_steps):
 
                 with torch.no_grad():
-                    action, _ = adapted_policy.get_action(
+                    action, _ = self.base_policy.get_action(
                         state,
+                        params=adapted_params,
                         deterministic=True,
                     )
 
@@ -692,58 +693,43 @@ class MAML:
     ):
         """Fast adaptation updates."""
 
-        adapted_policy = self._clone_policy()
-        optimizer = optim.SGD(adapted_policy.parameters(), lr=self.inner_lr)
+        base_params = OrderedDict(
+            {
+                k: v.clone().detach().requires_grad_(True)
+                for k, v in self.base_policy.named_parameters()
+            }
+        )
+        all_stats = []
+        adapted_params = base_params
 
         for step in range(adaptation_steps):
 
-            # --- 1. collect fresh data each step ---
+            # collect fresh data each step ---
             trajectories = []
             for _ in range(num_trajectories):
-                traj = self._collect_trajectory(
-                    task_env, dict(adapted_policy.named_parameters())
-                )
+                traj = self._collect_trajectory(task_env, adapted_params)
                 trajectories.append(traj)
-
-            # --- 2. flatten batch ---
             data = self._flatten_trajectories(trajectories)
 
-            # --- 3. forward pass ---
-            values, logprobs, entropy = adapted_policy.evaluate_action(
-                data["states"], data["actions"]
+            loss, stats = self._vpg_loss(data, adapted_params, looptype="inner")
+            all_stats.append(stats)
+
+            grads = torch.autograd.grad(
+                loss, adapted_params.values(), allow_unused=True
             )
 
-            # --- 4. policy loss ---
-            policy_loss = -(logprobs * data["advantages"]).mean()
-
-            value_loss = F.mse_loss(values.squeeze(-1), data["returns"])
-
-            # ----- Entropy Loss -----
-            entropy_loss = entropy.mean()
-
-            # ----- Total Loss -----
-            loss = (
-                policy_loss
-                + self.meta_vf_coef * value_loss
-                - self.meta_ent_coef * entropy_loss
+            adapted_params = OrderedDict(
+                {
+                    k: v - self.inner_lr * g if g is not None else v
+                    for (k, v), g in zip(adapted_params.items(), grads)
+                }
             )
-
-            # --- 5. update ---
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                adapted_policy.parameters(), self.max_grad_norm
-            )
-            optimizer.step()
 
         stats = {
-            "loss": loss.item(),
-            "policy_loss": policy_loss.item(),
-            "value_loss": value_loss.item(),
-            "entropy": entropy_loss.item(),
+            key: np.mean([s[key] for s in all_stats]) for key in all_stats[0].keys()
         }
 
-        return adapted_policy, stats
+        return adapted_params, stats
 
     def _clone_policy(self) -> ActorCriticNetwork:
         """Create a deep copy of the base policy."""
