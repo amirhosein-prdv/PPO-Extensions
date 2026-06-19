@@ -97,6 +97,7 @@ class MAML:
             task_envs = [self.env_fn() for _ in range(self.outer_batch_size)]
 
             all_inner_stats = []
+            all_meta_stats = []
             task_gradients = []
 
             base_params = OrderedDict(
@@ -127,6 +128,7 @@ class MAML:
                 # task_meta_loss, meta_stats = self._ppo_loss(
                 #     data, adapted_params, looptype="outer"
                 # )
+                all_meta_stats.append(meta_stats)
 
                 # ----- Compute gradients for this task -----
                 if self.second_order:
@@ -165,18 +167,22 @@ class MAML:
             )
             self.meta_optimizer.step()
 
-            avg_stats = {
+            inner_stats = {
                 key: np.mean([s[key] for s in all_inner_stats])
                 for key in all_inner_stats[0].keys()
+            }
+            meta_stats = {
+                key: np.mean([s[key] for s in all_meta_stats])
+                for key in all_meta_stats[0].keys()
             }
 
             if self.logger is not None:
                 self.logger.add_scalar("Meta Loss/policy", meta_stats["policy_loss"])
                 self.logger.add_scalar("Meta Loss/value", meta_stats["value_loss"])
                 self.logger.add_scalar("Meta Loss/entropy", meta_stats["entropy"])
-                self.logger.add_scalar("Inner Loss/policy", avg_stats["policy_loss"])
-                self.logger.add_scalar("Inner Loss/value", avg_stats["value_loss"])
-                self.logger.add_scalar("Inner Loss/entropy", avg_stats["entropy"])
+                self.logger.add_scalar("Inner Loss/policy", inner_stats["policy_loss"])
+                self.logger.add_scalar("Inner Loss/value", inner_stats["value_loss"])
+                self.logger.add_scalar("Inner Loss/entropy", inner_stats["entropy"])
 
             if iteration % eval_interval == 0:
 
@@ -185,7 +191,7 @@ class MAML:
                     f"\nMeta Loss: Policy Loss = {meta_stats['policy_loss']:.5f}, Value Loss = {meta_stats['value_loss']:.5f}, Entropy = {meta_stats['entropy']:.5f}",
                     # "\n" + " " * 12,
                     # f"Clipfrac = {meta_stats['clipfracs']:.5f}, Explained Var. = {meta_stats['explained_var']:.5f}, Approx KL. = {meta_stats['approx_kl']:.5e}.",
-                    f"\nInner Loss: Policy Loss = {avg_stats['policy_loss']:.5f}, Value Loss = {avg_stats['value_loss']:.3f}, Entropy = {avg_stats['entropy']:.3f}.",
+                    f"\nInner Loss: Policy Loss = {inner_stats['policy_loss']:.5f}, Value Loss = {inner_stats['value_loss']:.3f}, Entropy = {inner_stats['entropy']:.3f}.",
                     # "\n" + " " * 12,
                     # f"Clipfrac = {avg_stats['clipfracs']:.5f}, Explained Var. = {avg_stats['explained_var']:.5f}, Approx KL. = {avg_stats['approx_kl']:.5e}.",
                 )
