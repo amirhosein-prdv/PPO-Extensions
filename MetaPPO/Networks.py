@@ -73,8 +73,9 @@ class Actor(nn.Module):
                 w_key = f"{prefix}.{idx}.weight"
                 b_key = f"{prefix}.{idx}.bias"
                 x = F.linear(x, params[w_key], params[b_key])
-            elif isinstance(submodule, self.activation_fn.__class__):
-                x = self.activation_fn(x)
+            elif isinstance(submodule, self.activation_fn):
+                # x = self.activation_fn(x)
+                x = submodule(x)
             else:
                 raise TypeError(f"Unsupported layer type: {type(submodule)}")
         return x
@@ -123,8 +124,9 @@ class Critic(nn.Module):
                 w_key = f"{prefix}.{idx}.weight"
                 b_key = f"{prefix}.{idx}.bias"
                 x = F.linear(x, params[w_key], params[b_key])
-            elif isinstance(submodule, self.activation_fn.__class__):
-                x = self.activation_fn(x)
+            elif isinstance(submodule, self.activation_fn):
+                # x = self.activation_fn(x)
+                x = submodule(x)
             else:
                 raise TypeError(f"Unsupported layer type: {type(submodule)}")
         return x
@@ -264,8 +266,8 @@ class ActorCriticNetwork(nn.Module):
                     w_key = f"feature_extractor.{idx}.weight"
                     b_key = f"feature_extractor.{idx}.bias"
                     x = F.linear(x, params[w_key], params[b_key])
-                elif isinstance(submodule, nn.Tanh):
-                    x = torch.tanh(x)
+                elif isinstance(submodule, self.activation_fn):
+                    x = submodule(x)
                 else:
                     raise TypeError(
                         f"Unsupported layer in feature_extractor: {type(submodule)}"
