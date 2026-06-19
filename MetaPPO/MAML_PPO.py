@@ -72,7 +72,7 @@ class MAML:
 
         # Base policy (meta-initialization)
         self.base_policy = ActorCriticNetwork(state_dim, action_dim, policy_kwargs)
-        self.meta_optimizer = optim.Adam(self.base_policy.parameters(), lr=meta_lr)
+        self.meta_optimizer = optim.SGD(self.base_policy.parameters(), lr=meta_lr)
 
         self.device = self.base_policy.device
         self.logger = logger
@@ -687,7 +687,7 @@ class MAML:
         """Fast adaptation updates."""
 
         adapted_policy = self._clone_policy()
-        optimizer = optim.Adam(adapted_policy.parameters(), lr=self.inner_lr)
+        optimizer = optim.SGD(adapted_policy.parameters(), lr=self.inner_lr)
 
         for step in range(adaptation_steps):
 
