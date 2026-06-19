@@ -4,14 +4,15 @@ import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
 import gymnasium as gym
+from collections import OrderedDict
 from typing import List, Dict, Tuple, Optional, Callable, Union
 
 from .Networks import ActorCriticNetwork
 from .logger import Logger
 
 
-# ---------- MAML for PPO ----------
-class MAMLPPO:
+# ---------- MAML Algorithm ----------
+class MAML:
     def __init__(
         self,
         env_fn,
@@ -30,7 +31,7 @@ class MAMLPPO:
         max_grad_norm: float = 1.0,
         normalize_advantage: bool = False,
         normalize_return: bool = False,
-        inner_steps: int = 2,  # number of inner PPO updates
+        inner_steps: int = 2,  # number of inner updates
         outer_batch_size: int = 10,  # number of tasks per meta-batch
         max_steps: int = 200,
         traj_per_task: int = 10,
@@ -87,7 +88,7 @@ class MAMLPPO:
         callbacks: Optional[List[Callable]] = None,
     ):
         """Main meta-training loop."""
-        print("Starting MAML-PPO meta-training...")
+        print("Starting meta-training...")
 
         for iteration in range(num_meta_iterations):
             self.logger.update_global_step(iteration) if self.logger else None
@@ -98,10 +99,12 @@ class MAMLPPO:
             all_inner_stats = []
             task_gradients = []
 
-            base_params = {
-                k: v.clone().detach().requires_grad_(True)
-                for k, v in self.base_policy.named_parameters()
-            }
+            base_params = OrderedDict(
+                {
+                    k: v.clone().detach().requires_grad_(True)
+                    for k, v in self.base_policy.named_parameters()
+                }
+            )
 
             for task_idx, task_env in enumerate(task_envs):
 
@@ -201,7 +204,7 @@ class MAMLPPO:
                 env.close()
 
     # ====================================================================
-    #  Inner update: REINFORCE for fast adaptation
+    #  Inner update: fast adaptation
     # ====================================================================
     def _inner_update(self, task_env, base_params):
         """
@@ -209,7 +212,7 @@ class MAMLPPO:
         Returns updated parameters (dict) that are a function of base_params.
         """
         # Clone base parameters
-        fast_params = {k: v.clone() for k, v in base_params.items()}
+        fast_params = OrderedDict({k: v.clone() for k, v in base_params.items()})
 
         all_inner_stats = []
         for _ in range(self.inner_steps):
@@ -704,7 +707,7 @@ class MAMLPPO:
                 data["states"], data["actions"]
             )
 
-            # --- 4. PPO loss ---
+            # --- 4. policy loss ---
             policy_loss = -(logprobs * data["advantages"]).mean()
 
             value_loss = F.mse_loss(values.squeeze(-1), data["returns"])
