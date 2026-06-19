@@ -39,6 +39,7 @@ class MAML:
             "feature": [],
             "pi": [64, 64],
             "vf": [64, 64],
+            "activation_fn": nn.Tanh,
         },
         second_order: bool = True,  # True -> exact MAML, False -> FOMAML
         logger: Optional[Logger] = None,
