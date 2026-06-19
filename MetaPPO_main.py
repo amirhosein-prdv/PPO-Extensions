@@ -1,6 +1,6 @@
 from MetaPPO.MakeEnv import *
 
-from MetaPPO.MAML_PPO import MAMLPPO
+from MetaPPO.MAML_PPO import MAML
 from MetaPPO.MAML_TRPO import MAMLTRPO
 from MetaPPO.Reptile_PPO import ReptilePPO
 from MetaPPO.SB3_Reptile_PPO import SB3ReptilePPO
@@ -65,7 +65,7 @@ if __name__ == "__main__":
                 logger=logger,
             )
         case "MetaPPO":
-            meta_ppo = MAMLPPO(
+            meta_ppo = MAML(
                 env_fn=env_factory,
                 state_dim=state_dim,
                 action_dim=action_dim,
