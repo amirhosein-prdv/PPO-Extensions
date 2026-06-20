@@ -1,6 +1,8 @@
+import torch.nn as nn
+
 from MetaPPO.MakeEnv import *
 
-from MetaPPO.MAML_PPO import MAML
+from MetaPPO.MAML_NeuralCritic import MAML
 from MetaPPO.MAML_TRPO import MAMLTRPO
 from MetaPPO.Reptile_PPO import ReptilePPO
 from MetaPPO.SB3_Reptile_PPO import SB3ReptilePPO
@@ -35,7 +37,7 @@ if __name__ == "__main__":
     # chkpt_dir = f"./results/Meta/{alg_name}/{env_name}/models"
     # chkpt_dir = get_unique_log_dir(chkpt_dir)
 
-    logger = Logger(log_dir=f"./Results/Meta/{alg_name}/{env_name}/tb")
+    logger = Logger(log_dir=f"./Results/Meta/{alg_name}/{env_name}/tb_FO_Critic")
 
     # ----------------------------
     # MAML MODEL
@@ -83,8 +85,9 @@ if __name__ == "__main__":
                     "feature": [],
                     "pi": [128, 128],
                     "vf": [128, 128],
+                    "activation_fn": nn.Tanh,
                 },
-                second_order=True,
+                second_order=False,
                 logger=logger,
             )
         case "ReptilePPO":
