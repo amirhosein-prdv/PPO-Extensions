@@ -293,3 +293,233 @@ class ActorCriticNetwork(nn.Module):
         for name, param in params.items():
             if name in own_state:
                 own_state[name].copy_(param)
+
+
+class PolicyNetwork(nn.Module):
+    """Policy Network (Gaussian).
+    Supports functional parameter passing for MAML inner loops.
+    """
+
+    def __init__(
+        self,
+        state_dim: int,
+        action_dim: int,
+        policy_kwargs: dict[str, List[int]] = {
+            "feature": [],
+            "pi": [64, 64],
+            "vf": [64, 64],
+            "activation_fn": nn.Tanh,
+        },
+    ):
+        super().__init__()
+
+        self.action_dim = action_dim
+        actor_fc_dims = policy_kwargs["pi"]
+        self.activation_fn = policy_kwargs["activation_fn"]
+
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        input_dim = state_dim
+
+        # Actor head
+        self.actor = Actor(
+            input_dim, action_dim, actor_fc_dims, activation_fn=self.activation_fn
+        )
+
+        self.to(self.device)
+
+    def forward(
+        self,
+        observation: np.ndarray,
+        params: Optional[Dict] = None,
+        deterministic: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Forward pass with optional alternative parameters.
+        Returns:
+            action_mean: torch.Tensor (batch_size, action_dim)
+            action_logstd: torch.Tensor (action_dim,)
+            value: torch.Tensor (batch_size,)
+        """
+        state = torch.as_tensor(observation, dtype=torch.float32, device=self.device)
+        state = state.unsqueeze(0) if state.dim() == 1 else state
+
+        action_mean, action_std = self.actor(state, params, "actor")
+        dist = Normal(action_mean, action_std)
+
+        if deterministic:
+            actions = dist.mean
+        else:
+            actions = dist.rsample()
+        logprobs = dist.log_prob(actions).sum(-1)
+
+        return actions, logprobs
+
+    def evaluate_action(
+        self, observation: np.ndarray, action: np.ndarray, params: Optional[Dict] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Returns: (values, logprobs, entropy)
+        """
+        state = torch.as_tensor(observation, dtype=torch.float32, device=self.device)
+        state = state.unsqueeze(0) if state.dim() == 1 else state
+
+        action_mean, action_std = self.actor(state, params, "actor")
+        dist = Normal(action_mean, action_std)
+
+        action = torch.as_tensor(action, dtype=torch.float32, device=self.device)
+        logprobs = dist.log_prob(action).sum(-1)
+        entropy = dist.entropy().sum(-1)
+
+        return logprobs, entropy
+
+    def get_parameters_dict(self) -> Dict[str, torch.Tensor]:
+        """Return a flat dictionary of all parameters (names -> tensors)."""
+        return OrderedDict({name: param for name, param in self.named_parameters()})
+
+    def load_parameters_dict(self, params: Dict[str, torch.Tensor]) -> None:
+        """Load parameters from a dictionary (for cloning or evaluation)."""
+        own_state = self.state_dict()
+        for name, param in params.items():
+            if name in own_state:
+                own_state[name].copy_(param)
+
+
+class ValueNetwork(nn.Module):
+    """Value (critic) Network.
+    Supports functional parameters.
+    """
+
+    def __init__(
+        self,
+        state_dim: int,
+        policy_kwargs: dict[str, List[int]] = {
+            "feature": [],
+            "pi": [64, 64],
+            "vf": [64, 64],
+            "activation_fn": nn.Tanh,
+        },
+    ):
+        super().__init__()
+        critic_fc_dims = policy_kwargs["vf"]
+        self.activation_fn = policy_kwargs["activation_fn"]
+
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Critic head
+        self.critic = Critic(
+            state_dim, critic_fc_dims, activation_fn=self.activation_fn
+        )
+
+        self.to(self.device)
+
+    def forward(
+        self,
+        observation: np.ndarray,
+        params: Optional[Dict] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Forward pass with optional alternative parameters.
+        Returns:
+            action_mean: torch.Tensor (batch_size, action_dim)
+            action_logstd: torch.Tensor (action_dim,)
+            value: torch.Tensor (batch_size,)
+        """
+        state = torch.as_tensor(observation, dtype=torch.float32, device=self.device)
+        state = state.unsqueeze(0) if state.dim() == 1 else state
+
+        values = self.critic(state, params, "critic")
+
+        return values
+
+    def get_parameters_dict(self) -> Dict[str, torch.Tensor]:
+        """Return a flat dictionary of all parameters (names -> tensors)."""
+        return OrderedDict({name: param for name, param in self.named_parameters()})
+
+    def load_parameters_dict(self, params: Dict[str, torch.Tensor]) -> None:
+        """Load parameters from a dictionary (for cloning or evaluation)."""
+        own_state = self.state_dict()
+        for name, param in params.items():
+            if name in own_state:
+                own_state[name].copy_(param)
+
+
+class LinearValueNetwork(nn.Module):
+    """
+    ## Description
+
+    A linear state-value function, whose parameters are found by minimizing
+    least-squares.
+    Linear baseline based on handcrafted features, as described in [1]
+    (Supplementary Material 2).
+
+    ## Credit
+
+    Adapted from Tristan Deleu's implementation.
+
+    ## References
+
+    [1] Yan Duan, Xi Chen, Rein Houthooft, John Schulman, Pieter Abbeel,
+        "Benchmarking Deep Reinforcement Learning for Continuous Control", 2016
+        (https://arxiv.org/abs/1604.06778)
+
+    """
+
+    def __init__(self, input_size, reg=1e-5):
+        """
+        ## Arguments
+
+        * `inputs_size` (int) - Size of input.
+        * `reg` (float, *optional*, default=1e-5) - Regularization coefficient.
+        """
+        super().__init__()
+
+        self.linear = nn.Linear(2 * input_size + 4, 1, bias=False)
+        self.reg = reg
+        self.device = torch.device("cpu")
+
+    def _features(self, states):
+        length = states.size(0)
+        ones = torch.ones(length, 1).to(states.device)
+        al = (
+            torch.arange(length, dtype=torch.float32, device=states.device).view(-1, 1)
+            / 100.0
+        )
+        return torch.cat([states, states**2, al, al**2, al**3, ones], dim=1)
+
+    def fit(self, states, returns):
+        """
+        ## Description
+
+        Fits the parameters of the linear model by the method of least-squares.
+
+        ## Arguments
+
+        * `states` (tensor) - States collected with the policy to evaluate.
+        * `returns` (tensor) - Returns associated with those states (ie, discounted rewards).
+        """
+        features = self._features(states)
+        reg = self.reg * torch.eye(features.size(1))
+        reg = reg.to(states.device)
+        A = features.t() @ features + reg
+        b = features.t() @ returns
+        if hasattr(torch, "linalg") and hasattr(torch.linalg, "lstsq"):
+            coeffs = torch.linalg.lstsq(A, b).solution
+        else:
+            raise NotImplementedError()
+
+        self.linear.weight.data = coeffs.data.t()
+
+    def forward(self, state):
+        """
+        ## Description
+
+        Computes the value of a state using the linear function approximator.
+
+        ## Arguments
+
+        * `state` (Tensor) - The state to evaluate.
+        """
+        state = torch.as_tensor(state, dtype=torch.float32, device=self.device)
+        features = self._features(state)
+        return self.linear(features)
